@@ -171,9 +171,9 @@ uuid@3.0.0:
   version "3.0.0"
   resolved "https://registry.yarnpkg.com/uuid/-/uuid-3.0.0.tgz#6728fc0459c450d796a99c31837569bdf672d728"
 
-"validana-core@git+ssh://git@github.com:Coinversable/validana-core.git#v1.0.0":
+"validana-core@git://github.com/Coinversable/validana-core.git#v1.0.0":
   version "1.0.0"
-  resolved "git+ssh://git@github.com:Coinversable/validana-core.git#72f310ddf22d9f9654b435ffc4ca344f6b86d38a"
+  resolved "git://github.com/Coinversable/validana-core.git#72f310ddf22d9f9654b435ffc4ca344f6b86d38a"
   dependencies:
     "@types/node" "*"
     "@types/pg" "^7.4.5"
