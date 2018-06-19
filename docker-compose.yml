@@ -48,11 +48,11 @@ services:
       VSERVER_RESTPORT: 80
       # Make sure it is the same as the port you expose.
       VSERVER_WSPORT: 8080
-      VSERVER_API: '{"v1": "dist/basics/basichandler.js"}'
+      VSERVER_API: '{"v1": "/usr/node/dist/basics/basichandler.js"}'
       VSERVER_TLS: 'false'
       VSERVER_KEYPATH: ''
       VSERVER_CERTPATH: ''
-    expose:
+    ports:
       - "80:80"
       - "8080:8080"
 
