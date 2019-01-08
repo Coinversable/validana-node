@@ -343,8 +343,8 @@ export class Node extends Basic {
 						//Additional data to help searching for transactions
 						contractType,
 						payload.receiver === undefined ? undefined : payload.receiver.toString().slice(0, 35),
-						payload.extra1 === undefined ? undefined : payload.extra1.toString().slice(0, 128),
-						payload.extra2 === undefined ? undefined : payload.extra2.toString().slice(0, 128)
+						payload.extra1 === undefined ? undefined : payload.extra1.toString().slice(0, 64),
+						payload.extra2 === undefined ? undefined : payload.extra2.toString().slice(0, 64)
 					];
 					if ((result = await this.query(this.insertTx, params)).error !== undefined) {
 						if (result.error!.message.indexOf("violates unique constraint") !== -1) {
