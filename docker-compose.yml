@@ -2,58 +2,69 @@ version: "2"
 services:
   node:
     build:
-      context: https://github.com/Coinversable/validana-node.git#v1.0.1
+      context: https://github.com/Coinversable/validana-node.git#v2.1.2
       dockerfile: Node.Dockerfile
       args:
-        NODEVERSION: 10
+        NODEVERSION: 12
     restart: unless-stopped
     environment:
+      VNODE_DBHOST: database
       # The processor should have these values for you.
       VNODE_ENCRYPTIONKEY: 
       VNODE_PUBLICKEY: 
       VNODE_PROCESSORHOST: 
       VNODE_PROCESSORPORT: 443
       VNODE_TLS: 'true'
-      # Make sure it is the same as the port you expose.
-      VNODE_LISTENPORT: 29473
       # Should be the same as database NODEPASS below.
       VNODE_DBPASSWORD: 
-      VNODE_DBHOST: database
+      # Should be the same as database NETWORKPASS below.
+      VNODE_DBPASSWORD_NETWORK: 
     ports:
-      - "29473:29473"
+      # Change the left value to the port you want to expose it on, the right value is used internally.
+      - "29473:29473" # Port used for incomming p2p connections.
   database:
     build: 
-      context: https://github.com/Coinversable/validana-node.git#v1.0.1
+      context: https://github.com/Coinversable/validana-node.git#v2.1.2
       dockerfile: DB.Dockerfile
       args:
+        # Use the same version as the processor uses
+        POSTGRESVERSION: 12
+        # The nodepass and networkpass are to be used by the node only.
+        # Changing this afterwards requires removing the docker volume (containing all data!) or manually connecting to postgres and updating the password.
         NODEPASS: 
+        NETWORKPASS: 
+        # The backend pass can be used for any application wishing to integrate.
+        # Changing this afterwards requires removing the docker volume (containing all data!) or manually connecting to postgres and updating the password.
         BACKENDPASS: 
     restart: unless-stopped
     environment:
+      # The superuser should only be used for maintenance, backups, etc, never edit the data directly!
       POSTGRES_PASSWORD: 
     volumes:
       - blockchain_node:/var/lib/postgresql/data
+    # If you wish to connect to the database from outside use 'ports:' like the node and server use.
     expose:
       - "5432"
   server:
     build: 
-      context: https://github.com/Coinversable/validana-server.git#v1.0.1
+      # The server you wish to use.
+      context: https://github.com/Coinversable/validana-server.git#v2.1.0
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      VSERVER_DBPASSWORD: 
       VSERVER_DBNAME: blockchain_node
       VSERVER_DBHOST: database
-      # Make sure it is the same as the port you expose.
-      VSERVER_RESTPORT: 80
-      # Make sure it is the same as the port you expose.
-      VSERVER_WSPORT: 8080
-      VSERVER_API: '{"v1": "/usr/node/dist/basics/basichandler.js"}'
+      # Should be the same as database BACKENDPASS above.
+      VSERVER_DBPASSWORD: 
+      # If you want to copy the key/cert files into the container download the Dockerfile and edit it manually.
+      # If you want to reference files outside the container (e.g. the ./certificates folder) uncomment the volume below.
       VSERVER_TLS: 'false'
-      VSERVER_KEYPATH: ''
-      VSERVER_CERTPATH: ''
+      VSERVER_KEYPATH: '/usr/node/certificates/mycert.key'
+      VSERVER_CERTPATH: '/usr/node/certificates/mycert.cert'
+    #volumes:
+      #- ./certificates:/usr/node/certificates
     ports:
-      - "80:80"
+      # Change the left value to the port you want to expose it on, the right value is used internally.
       - "8080:8080"
 
 volumes:

@@ -1,4 +1,4 @@
-/**
+/*!
  * @license
  * Copyright Coinversable B.V. All Rights Reserved.
  *
@@ -8,16 +8,14 @@
 
 import * as net from "net";
 import { Worker } from "cluster";
-import { Client as DBClient, QueryResult, QueryConfig, types } from "pg";
+import { QueryResult, types, Pool } from "pg";
 import { Crypto, Log, Block, DBBlock, PublicKey } from "@coinversable/validana-core";
-import { VObserver } from "../tools/observer";
 import { Config } from "../config";
-import { Peer, RetrievingBlocks } from "./peer";
+import { Peer } from "./peer";
 
-/** Make sure if we query the database any BIGINTs are returned as a number, instead of a string. */
-types.setTypeParser(20, (val: string) => {
-	return Number.parseInt(val, 10);
-});
+/** Make sure if we query the database any BIGINT (array)s are returned as a number, instead of a string. */
+types.setTypeParser(20, (val: string) => Number.parseInt(val, 10));
+types.setTypeParser(1016, (val: string) => val.length === 2 ? [] : val.slice(1, -1).split(",").map((v) => Number.parseInt(v, 10)));
 
 /** Request from the node for information about the blockchain. */
 export interface NodeRequest {
@@ -45,35 +43,40 @@ export interface ProcessorResponse {
  * The client contains the basic functions that both the processor client and the node client require.
  * This includes sharing its own blocks and peers with others.
  */
-export abstract class Client implements VObserver<RetrievingBlocks | Array<{ ip: string, port: number }> | number | boolean> {
+export abstract class Client {
 	/** Our version, oldest compatible version and extension flags that we support. Version 0 and 255 are reserved for testing. */
 	public static readonly version = 1;
 	public static readonly oldestCompatibleVersion = 1;
 	public static readonly extensionFlags = Crypto.hexToBinary("00000000");
+	/** The amount of blocks to keep in memory, as other peers will likely request the latest blocks from us. */
+	protected static readonly CACHED_BLOCKS = 10;
+	/** We allow message up to 10MB to avoid dos attacks from large message bodies. */
+	public static readonly MAX_MESSAGE_SIZE = 10000000;
+	/** We send at most 50 blocks at the time to avoid selecting too much from the database. */
+	public static readonly MAX_BLOCKS = 50;
 
 	public readonly config: Readonly<Config>;
 	public readonly worker: Worker;
+	protected readonly pool: Pool;
+
 	public readonly encryptionKey: Buffer | undefined; //undefined if we don't use encryption
 	protected server: net.Server | undefined; //undefined till it is created
 	protected isClosingServer: boolean = false; //Is it currently closing the server?
 	protected permanentlyClosed: boolean = false; //Is this client currently shutting down?
-	public port: number | undefined; //Port we are listening on for incomming connections (or undefined if we don't know yet)
+	public port: number | undefined; //Port we are listening on for incoming connections (or undefined if we don't know yet)
 	public ip: string | "processor" | undefined; //Our ip address (or "processor" if it is the processor or undefined if we don't know yet)
-
-	protected client: DBClient | undefined;
-	public latestRetrievedBlock: number = -1; //Latest block we have retrieved
-
-	protected latestExistingBlock: number = 0; //Latest block that exists in the blockchain
-	protected latestExistingBlockInterval: NodeJS.Timer | undefined; //Timer that increases the amount of blocks that exist in the blockchain
 	public signPrefix: Buffer = Buffer.alloc(0);
 	public prefixLength: Buffer = Crypto.uInt8ToBinary(0);
 	public processorPubKey: PublicKey | undefined; //Undefined for the processor, as it doesn't need to verify blocks
 	public blockMaxSize: number = 110000; //The max size a block may be (at least 1 max size transaction + some extra for overhead)
-	public peers: Array<Readonly<Peer>> = []; //The peers we are connected to
-	protected badPeers: Array<Readonly<Peer>> = []; //The peers we recently disconnected from for some reason
 
-	protected cachedBlocks: Block[] = []; //Blocks cached in memory so it doesn't have to retrieve recent blocks from the DB all the time
+	public latestRetrievedBlock: number = -1; //Latest block we have retrieved
+	protected latestExistingBlock: number = 0; //Latest block that exists in the blockchain
+	protected latestExistingBlockInterval: NodeJS.Timer | undefined; //Timer that increases the amount of blocks that exist in the blockchain
 	protected cachedBlocksStartId: number = -1; //Id of first block cached in memory
+	protected readonly cachedBlocks: Block[] = []; //Blocks cached in memory so it doesn't have to retrieve recent blocks from the DB all the time
+	protected readonly disconnectedPeers: Array<Readonly<Peer>> = []; //The peers we recently disconnected from for some reason
+	public readonly peers: Array<Readonly<Peer>> = []; //The peers we are connected to
 
 	/**
 	 * Create a new client.
@@ -89,14 +92,21 @@ export abstract class Client implements VObserver<RetrievingBlocks | Array<{ ip:
 		if (config.VNODE_LISTENPORT !== 0) {
 			this.port = this.config.VNODE_LISTENPORT;
 		}
+		const user = this.config.VNODE_ISPROCESSOR ? this.config.VNODE_DBUSER : this.config.VNODE_DBUSER_NETWORK;
+		const password = this.config.VNODE_ISPROCESSOR ? this.config.VNODE_DBPASSWORD : this.config.VNODE_DBPASSWORD_NETWORK;
+		this.pool = new Pool({
+			user,
+			database: this.config.VNODE_DBNAME,
+			password,
+			port: this.config.VNODE_DBPORT,
+			host: this.config.VNODE_DBHOST,
+			min: this.config.VNODE_DBMINCONNECTIONS,
+			max: this.config.VNODE_DBMAXCONNECTIONS
+		}).on("error", (error) => {
+			error.message = error.message.replace(new RegExp(password, "g"), "");
+			Log.warn("Problem with database connection.", error);
+		});
 	}
-
-	/**
-	 * Called when a peer has new information for us.
-	 * @param o The peer that has new information.
-	 * @param arg What new information it has.
-	 */
-	public abstract update(o: Peer, arg?: RetrievingBlocks | Array<{ ip: string, port: number }> | number): void;
 
 	/**
 	 * Get the id of the latest block that is currently in the database or -1 if there are none. It will retry until it succeeds.
@@ -104,12 +114,8 @@ export abstract class Client implements VObserver<RetrievingBlocks | Array<{ ip:
 	 */
 	protected async getLatestRetrievedBlock(timeout = 5000): Promise<number> {
 		try {
-			const result = await this.query({ text: "SELECT * FROM basics.blocks ORDER BY block_id DESC LIMIT 1;" });
-			if (result.rows.length === 0) {
-				return -1;
-			} else {
-				return result.rows[0].block_id;
-			}
+			const result = (await this.query("SELECT * FROM basics.blocks ORDER BY block_id DESC LIMIT 1;", [])).rows[0];
+			return result?.block_id ?? -1;
 		} catch (error) {
 			Log.warn("Failed to retrieve database info", error);
 			return new Promise<number>((resolve) => setTimeout(() => resolve(this.getLatestRetrievedBlock(Math.min(timeout * 1.5, 300000))), timeout));
@@ -118,25 +124,11 @@ export abstract class Client implements VObserver<RetrievingBlocks | Array<{ ip:
 
 	/**
 	 * Query the database. Will connect to the database if it is not currently connected.
-	 * @param queryConfig The query to execute
+	 * @param query The query to execute
+	 * @param values The values to use
 	 */
-	protected async query(queryConfig: QueryConfig): Promise<QueryResult> {
-		if (this.client === undefined) {
-			this.client = new DBClient({
-				user: this.config.VNODE_DBUSER,
-				database: this.config.VNODE_DBNAME,
-				password: this.config.VNODE_DBPASSWORD,
-				port: this.config.VNODE_DBPORT,
-				host: this.config.VNODE_DBHOST
-			}).on("error", (error) => {
-				this.client = undefined;
-				//Do not accidentally capture password
-				error.message = error.message.replace(new RegExp(this.config.VNODE_DBPASSWORD!, "g"), "");
-				Log.warn("Problem with database connection.", error);
-			}).on("end", () => this.client = undefined);
-			await this.client.connect();
-		}
-		return this.client.query(queryConfig);
+	protected async query(query: string, values: any[]): Promise<QueryResult> {
+		return this.pool.query(query, values);
 	}
 
 	/**
@@ -151,21 +143,17 @@ export abstract class Client implements VObserver<RetrievingBlocks | Array<{ ip:
 			//We have everything cached, return immideately.
 			return this.cachedBlocks.slice(start - this.cachedBlocksStartId, end - this.cachedBlocksStartId);
 		}
-		if (end >= this.cachedBlocksStartId && end < this.cachedBlocksStartId + this.cachedBlocks.length) {
+		if (end > this.cachedBlocksStartId && end <= this.cachedBlocksStartId + this.cachedBlocks.length) {
 			//We have part of it cached, add that to the result and add the rest from the DB.
 			result.push(...this.cachedBlocks.slice(0, end - this.cachedBlocksStartId));
 			//This is the new end of what we still need to retrieve.
 			end = this.cachedBlocksStartId;
 		}
 		try {
-			const blocksResult = await this.query({
-				text: "SELECT * FROM basics.blocks WHERE block_id >= $1 AND block_id < $2 ORDER BY block_id DESC;",
-				values: [start, end]
-			});
-			for (const blockResult of blocksResult.rows as DBBlock[]) {
-				//Block in transit (and cache) exists of total length, version, blockId, hash, processedTs, transactions and signature
-				result.unshift(new Block(blockResult));
-			}
+			const blocks: DBBlock[] = (await this.query(
+				"SELECT * FROM basics.blocks WHERE block_id >= $1 AND block_id < $2 ORDER BY block_id ASC;", [start, end]
+			)).rows;
+			result.unshift(...blocks.map((block) => new Block(block)));
 		} catch (error) {
 			//Failed to retrieve (more) blocks from the DB
 			Log.warn("Failed to retrieve blocks from the DB.", error);
@@ -182,7 +170,7 @@ export abstract class Client implements VObserver<RetrievingBlocks | Array<{ ip:
 			}
 		}
 		if (!onlyConnected) {
-			for (const peer of this.badPeers) {
+			for (const peer of this.disconnectedPeers) {
 				if (ip === peer.ip && (port === peer.connectionPort || port === peer.listenPort)) {
 					return true;
 				}
@@ -226,19 +214,10 @@ export abstract class Client implements VObserver<RetrievingBlocks | Array<{ ip:
 			promises.push(this.shutdownServer());
 		}
 
-		//Do not add promises that may reject
-		await Promise.all(promises);
+		//Close database connection
+		promises.push(this.pool.end().catch((error) => Log.warn("Failed to properly shutdown database pool.", error)));
 
-		if (this.client !== undefined) {
-			try {
-				await this.client.end();
-			} catch (error) {
-				Log.warn("Failed to properly shutdown database client.", error);
-				if (exitCode === 0) {
-					exitCode = 1;
-				}
-			}
-		}
+		await Promise.all(promises);
 
 		return process.exit(exitCode);
 	}

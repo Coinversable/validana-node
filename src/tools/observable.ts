@@ -1,4 +1,4 @@
-/**
+/*!
  * @license
  * Copyright Coinversable B.V. All Rights Reserved.
  *
@@ -7,18 +7,28 @@
  */
 
 import { VObserver } from "./observer";
+import { Log } from "@coinversable/validana-core";
 
 /**
  * Classical Observable class
  * Generics are used to make it clear what data can be forwarded to observers.
+ * @deprecated Use an event emitter.
  */
 export class VObservable<T> {
+	private static deprecatedWarning: boolean = false;
 
 	// The observers this observable should notify
-	private observers: Array<VObserver<T>> = new Array<VObserver<T>>();
+	private observers: Array<VObserver<T>> = [];
 
 	// If this object has changed
 	private changed: boolean = false;
+
+	public constructor() {
+		if (!VObservable.deprecatedWarning) {
+			VObservable.deprecatedWarning = true;
+			Log.warn("VObservable is deprecated and will be removed in future version.", new Error("Deprecated"));
+		}
+	}
 
 	/**
 	 * Add observer to the list of observers.
@@ -38,16 +48,12 @@ export class VObservable<T> {
 		return this.observers.indexOf(o) !== -1;
 	}
 
-	/**
-	 * Indicates that the object is no longer changed.
-	 */
+	/** Indicates that the object is no longer changed. */
 	protected clearChanged(): void {
 		this.changed = false;
 	}
 
-	/**
-	 * Return the number of active observers.
-	 */
+	/** Return the number of active observers. */
 	public countObservers(): number {
 		return this.observers.length;
 	}
@@ -63,35 +69,28 @@ export class VObservable<T> {
 		}
 	}
 
-	/**
-	 * See if this element has changed.
-	 */
+	/** See if this element has changed. */
 	public hasChanged(): boolean {
 		return this.changed;
 	}
 
 	/**
-	 * Notify all listening observers when something has changed.
+	 * Notify all listening observers when something has changed
 	 * @param arg (optional) additional argument to pass on
 	 */
 	public notifyObservers(arg?: T): void {
-
 		// Make sure there are changes to notify
 		if (this.hasChanged()) {
-
-			// Call all observers
 			for (const observer of this.observers) {
 				observer.update(this, arg);
 			}
-
-			// Clear changed
 			this.clearChanged();
 		}
 	}
 
 	/**
 	 * Object contents have changed.
-	 * It is now possible to notify observers
+	 * It is now possible to notify observers.
 	 */
 	protected setChanged(): void {
 		this.changed = true;

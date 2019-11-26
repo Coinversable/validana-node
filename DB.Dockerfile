@@ -1,20 +1,18 @@
-FROM postgres:10
+ARG POSTGRESVERSION=11
+FROM postgres:${POSTGRESVERSION}
+ARG POSTGRESVERSION
 
+# If you change these values makes sure to also remove the volume used (which will wipe all data!) for it to update.
 ARG NODENAME=node
 ARG NODEPASS
+ARG NETWORKNAME=network
+ARG NETWORKPASS=$NODEPASS
 ARG BACKENDNAME=backend
 ARG BACKENDPASS
 
-COPY ./FullSetupDB.sql /docker-entrypoint-initdb.d/FullSetupDB.sql
-RUN sed -i -r \
-	-e "s/^--CREATE DATABASE /CREATE DATABASE /g" \
-	-e "s/^--\\\\c /\\\\c /g" \
-	-e "s/\/\*'Node password here'\*\//'$NODEPASS'/g" \
-	-e "s/usename = 'node'/usename = '$NODENAME'/g" \
-	-e "s/ROLE node/ROLE $NODENAME/g" \
-	-e "s/TO node;/TO $NODENAME;/g" \
-	-e "s/\/\*'Backend password here'\*\//'$BACKENDPASS'/g" \
-	-e "s/usename = 'backend'/usename = '$BACKENDNAME'/g" \
-	-e "s/ROLE backend/ROLE $BACKENDNAME/g" \
-	-e "s/TO backend;/TO $BACKENDNAME;/g" \
-	/docker-entrypoint-initdb.d/FullSetupDB.sql
+# Setup script
+COPY ./FullSetupDB.sql /docker-entrypoint-initdb.d/FullSetupDB
+RUN echo -e "#!/bin/bash\n\
+psql -U postgres -c \"CREATE DATABASE blockchain_node WITH ENCODING = 'UTF8'; SET synchronous_commit TO off;\"\n\
+psql -U postgres -d blockchain_node -v node_username=$NODENAME -v node_password=$NODEPASS -v network_username=$NETWORKNAME \
+	-v network_password=$NETWORKPASS -v backend_username=$BACKENDNAME -v backend_password=$BACKENDPASS -f FullSetupDB" > FullSetupDB.sh

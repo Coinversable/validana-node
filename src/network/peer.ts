@@ -1,4 +1,4 @@
-/**
+/*!
  * @license
  * Copyright Coinversable B.V. All Rights Reserved.
  *
@@ -9,8 +9,8 @@
 import * as net from "net";
 import * as encryption from "crypto";
 import { Crypto, Log, Block } from "@coinversable/validana-core";
-import { VObservable } from "../tools/observable";
 import { Client } from "./client";
+import { EventEmitter } from "events";
 
 /** How an outstanding block request looks like. */
 export interface RetrievingBlocks {
@@ -38,18 +38,20 @@ enum Message { Setup = 0, SetupResponse = 1, NextNeeded = 2, PeersRequest = 3, P
  * It will update observers with completed block requests, list of new peers, new latest block id and disconnects.
  * Any updates about block requests will contain blocks validated to be signed by the processor.
  */
-export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, port: number }> | number> {
+export class Peer extends EventEmitter {
 	private readonly client: Readonly<Client>;
 	public readonly ip: string | "processor"; //Ip address of this peer
 	private connection: net.Socket;
-	private connectionIncomming: boolean; //Direction of the connection
+	private connectionIncoming: boolean; //Direction of the connection
 	public readonly connectionPort: number; //Which port we are connected to
-	public listenPort: number | undefined; //Which port the peer is listening on for incomming connections.
+	public listenPort: number | undefined; //Which port the peer is listening on for incoming connections.
 	public version: number | undefined; //Version of this peer
 	public extensionFlags: Buffer | undefined; //Extension flags of this peer
 	public latestKnownBlock: number = -1; //Latest block this peer has
 
 	public disconnectTime: number | undefined; //At what time did we disconnect (or undefined if never)
+	private disconnectPromise: Promise<void> | undefined;
+	private disconnectResolve: (() => void) | undefined;
 
 	/** How fast do WE download from this peer. */
 	public downloadSpeed: number | undefined; //An indication of the download speed (only if we download something large)
@@ -63,10 +65,11 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 	 * Not a problem as we don't trust data send by other peers in the first place, but keep it in mind!
 	 * We use encryption so those who don't participate have a hard time finding out who participates and what data is stored.
 	 */
-	private sendingIV: Buffer = Buffer.alloc(0);
 	private sendingCipher: encryption.Cipher | undefined;
+	private sendingIV: Buffer = Buffer.alloc(0);
 	private receivingCipher: encryption.Decipher | undefined;
 	private refreshIV: number = 0; //When do we need to refresh the IV again.
+	private receiveRefreshIV: number = 0; //When does the other peer need to refresh the IV again.
 
 	/** If we are currently setting up this should have a value. */
 	private setupTimeout: NodeJS.Timer | undefined; //Time we give peer to respond to our request
@@ -80,11 +83,10 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 	private retrievingBlocksTimeout: NodeJS.Timer | undefined; //Time we give peer to respond to our request
 	private outstandingMessages: Array<{ message: Message; data: Buffer }> = [];
 
-	/** Create a new peer, either through an ip and port, after we can choose to connect, or through receiving an incomming connection. */
+	/** Create a new peer, either through an ip and port, after we can choose to connect, or through receiving an incoming connection. */
 	constructor(client: Readonly<Client>, connection: net.Socket | { ip: string, port: number }) {
 		super();
 		this.client = client;
-		this.addObserver(this.client);
 
 		//Create encryption key if needed
 		if (this.client.encryptionKey !== undefined) {
@@ -93,14 +95,14 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 		}
 		//Setup the connection or receive the connection
 		if (connection instanceof net.Socket) {
-			this.connectionIncomming = true;
+			this.connectionIncoming = true;
 			this.ip = connection.remoteAddress!;
 			this.connectionPort = connection.remotePort!;
 			this.connection = connection;
 		} else {
-			this.connectionIncomming = false;
+			this.connectionIncoming = false;
 			this.ip = connection.ip;
-			//We are both connected to this port and it is the port the peer is listening on for incomming connections.
+			//We are both connected to this port and it is the port the peer is listening on for incoming connections.
 			this.connectionPort = connection.port;
 			this.listenPort = connection.port;
 
@@ -153,7 +155,7 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 	}
 
 	/**
-	 * Deal with an incomming message from another peer for version 1 of the protocol.
+	 * Deal with an incoming message from another peer for version 1 of the protocol.
 	 * @param message The message type
 	 * @param data The data in the message.
 	 */
@@ -175,20 +177,21 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 					} else {
 						//Notify client about this peer knowing a new block.
 						this.latestKnownBlock = newLatestKnown;
-						this.setChanged();
-						this.notifyObservers(this.latestKnownBlock);
+						this.emit("latestKnown", this, this.latestKnownBlock);
 					}
 				}
 				break;
 			case Message.PeersRequest:
-				if (this.outstandingMessages.find((value) => value.message === Message.PeersRequest) !== undefined) {
+				if (this.outstandingMessages.some((value) => value.message === Message.PeersRequest)) {
 					this.disconnect("Peer send too many peer requests.");
 					return;
 				}
 				//Construct the response with all peers we have
 				const myPeers: Array<{ ip: string, port: number }> = [];
+				const IPv6 = this.ip.indexOf(":") === -1;
 				for (const peer of this.client.peers) {
-					if (peer !== this && peer.listenPort !== undefined) {
+					const peerIPv6 = peer.ip.indexOf(":") === -1;
+					if (peer !== this && peer.listenPort !== undefined && IPv6 === peerIPv6) {
 						myPeers.push({ ip: peer.ip, port: peer.listenPort });
 					}
 				}
@@ -206,9 +209,7 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 				}
 				try {
 					//Decrypt data if needed
-					if (this.receivingCipher !== undefined) {
-						data = this.receivingCipher.update(data);
-					}
+					data = this.decryptData(data);
 					const newPeers: Array<{ ip: string, port: number }> = JSON.parse(Crypto.binaryToUtf8(data));
 					if (!(newPeers instanceof Array)) {
 						this.disconnect("Peer send peers respond message with invalid array.");
@@ -227,15 +228,14 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 					}
 					//Even if we found none, let the client know about that.
 					this.lastRetrievedPeers = Date.now();
-					this.setChanged();
-					this.notifyObservers(notifyPeers);
+					this.emit("peers", notifyPeers);
 				} catch (error) {
 					this.disconnect("Peer send peers respond message with invalid json.");
 					return;
 				}
 				break;
 			case Message.BlocksRequest:
-				if (this.outstandingMessages.find((value) => value.message === Message.BlocksRequest) !== undefined) {
+				if (this.outstandingMessages.some((value) => value.message === Message.BlocksRequest)) {
 					this.disconnect("Peer send too many block requests.");
 					return;
 				}
@@ -244,8 +244,8 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 					return;
 				}
 				const start = Crypto.binaryToULong(data.slice(0, 8));
-				//We send at most maxMessageBlocks blocks at the time, even if more were requested.
-				const amount = Math.min(Crypto.binaryToUInt16(data.slice(8, 10)), this.client.config.VNODE_MAXSENDAMOUNT);
+				//We send at most MAX_BLOCKS blocks at the time, even if more were requested.
+				const amount = Math.min(Crypto.binaryToUInt16(data.slice(8, 10)), Client.MAX_BLOCKS);
 				if (!Number.isSafeInteger(start) || start < 0 || amount === 0) {
 					this.disconnect("Peer send blocks request message with invalid start or amount.");
 					return;
@@ -264,9 +264,7 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 					this.retrievingBlocksTimeout = undefined;
 				}
 				//Decrypt data if needed
-				if (this.receivingCipher !== undefined) {
-					data = this.receivingCipher.update(data);
-				}
+				data = this.decryptData(data);
 				let blocks: Block[];
 				try {
 					//Unmerge the blocks from the binary data, will throw an error if the data is invalid
@@ -307,8 +305,7 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 				//Make sure client can request new blocks right away
 				const response = this.retrievingBlocks;
 				this.retrievingBlocks = undefined;
-				this.setChanged();
-				this.notifyObservers(response);
+				this.emit("blocks", this, response);
 				break;
 			case Message.NewIV:
 				if (this.client.encryptionKey === undefined) {
@@ -319,7 +316,14 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 					this.disconnect("Peer send invalid new IV.");
 					return;
 				}
+				//Not allowed to refresh too often. 2^30= 1073741824
+				if (this.receiveRefreshIV < 1073741824) {
+					this.disconnect("Peer send new IV while we just started using the current one.");
+					return;
+				}
+				this.receivingCipher!.final();
 				this.receivingCipher = encryption.createDecipheriv("AES-256-CTR", this.client.encryptionKey, data);
+				this.receiveRefreshIV = 0;
 				break;
 			default:
 				this.disconnect("Peer send message with invalid message type.");
@@ -338,7 +342,7 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 		for (const block of blocks) {
 			totalSize += block.data.length;
 			//1 byte overhead for the message type, send at least 1 block
-			if (totalSize > this.client.config.VNODE_MAXSENDSIZE - 1 && toEncrypt.length !== 0) {
+			if (totalSize > Client.MAX_MESSAGE_SIZE - 1 && toEncrypt.length !== 0) {
 				break;
 			}
 			toEncrypt.push(block.data);
@@ -351,19 +355,36 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 		if (this.sendingCipher === undefined) {
 			return data;
 		}
-		//Needed every 2^32= 4294967296 blocks (We use some spare for the current message)
+		//aes-256 has a blocklength of 16 bytes or 128 bits (and a key length of 256 bits)
+		this.refreshIV += Math.ceil(data.length / 16);
+		//Needed every 2^32= 4294967296 blocks
 		if (this.refreshIV > 4200000000) {
 			//Do any needed cleanup.
 			this.sendingCipher.final();
 			//Create a new IV
 			this.sendingIV = encryption.randomBytes(16);
 			this.sendingCipher = encryption.createCipheriv("AES-256-CTR", this.client.encryptionKey!, this.sendingIV);
-			this.refreshIV = 0;
+			this.refreshIV = Math.ceil(data.length / 16);
 			this.send(Message.NewIV, this.sendingIV);
 		}
-		//aes-256 has a blocklength of 16 bytes or 128 bits (and a key length of 256 bits)
-		this.refreshIV += Math.ceil(data.length / 16);
 		return this.sendingCipher.update(data);
+	}
+
+	/** Decrypte the data (if needed) and returns the decrypted data. Will disconnect if other peer did not refresh IV in time. */
+	private decryptData(data: Buffer): Buffer {
+		if (this.receivingCipher === undefined) {
+			return data;
+		}
+
+		this.receiveRefreshIV += Math.ceil(data.length / 16);
+		//Needed every 2^32= 4294967296 blocks
+		if (this.receiveRefreshIV > 4294967296) {
+			//Do any needed cleanup.
+			this.receivingCipher.final();
+			this.disconnect("Peer did not refresh encryption IV.");
+			return Buffer.alloc(0);
+		}
+		return this.receivingCipher.update(data);
 	}
 
 	/**
@@ -383,41 +404,9 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 		if (ip === "processor") {
 			return true;
 		}
-
-		let IPv6Parts = ip.split(":");
-		const IPv4Parts = ip.split(".");
-		//If it is a valid IPv6 Address
-		if (IPv6Parts.length >= 3 && IPv6Parts.length <= 8) {
-			//IPv4 mapped IPv6 address
-			if (ip.startsWith("::ffff:")) {
-				if (IPv6Parts.length === 4 && IPv4Parts.length === 4) {
-					IPv4Parts[0] = IPv4Parts[0].slice("::ffff:".length);
-					IPv6Parts = []; //We no longer have to check this.
-				} else if (IPv6Parts.length === 5) {
-					IPv4Parts[0] = (IPv6Parts[3].length < 3 ? 0 : Number.parseInt(`0x${IPv6Parts[3].slice(-4, -2)}`)).toString();
-					IPv4Parts[1] = Number.parseInt(`0x${IPv6Parts[3].slice(-2)}`).toString();
-					IPv4Parts[2] = (IPv6Parts[4].length < 3 ? 0 : Number.parseInt(`0x${IPv6Parts[4].slice(-4, -2)}`)).toString();
-					IPv4Parts[3] = Number.parseInt(`0x${IPv6Parts[4].slice(-2)}`).toString();
-				} else {
-					//Invalid IPv4 mapped IPv6 address
-					return false;
-				}
-			}
-		} else if (IPv4Parts.length !== 4) {
-			//Neighter valid IPv6 address, nor valid IPv4 Address
-			return false;
-		}
-
-		//Check for valid IPv4 address
-		if (IPv4Parts.length === 4) {
-			//In case it was constructed from an IPv6 address
-			ip = IPv4Parts.join(".");
-			//If we have invalid numbers
-			for (const part of IPv4Parts) {
-				if (/^(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$/.exec(part) === null) {
-					return false;
-				}
-			}
+		const ipVersion = net.isIP(ip);
+		if (ipVersion === 4) {
+			const IPv4Parts = ip.split(".");
 			//Do not allow loopback addresses for the port we are listening to.
 			if ((IPv4Parts[0] === "127" || ip === this.client.ip) && port === this.client.port) {
 				return false;
@@ -426,30 +415,8 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 			if (IPv4Parts[0] === "0" && IPv4Parts[1] === "0" && IPv4Parts[2] === "0" && IPv4Parts[3] === "0") {
 				return false;
 			}
-		}
-
-		//Check for valid IPv6 address
-		if (IPv6Parts.length >= 3) {
-			//In case we had a IPv4 mapped IPv6 address
-			ip = IPv6Parts.join(":");
-			let foundDoubleColon = false;
-			for (let i = 0; i < IPv6Parts.length; i++) {
-				if (IPv6Parts[i] === "") {
-					//Found the one :: that it may contain, if we already found one it is invalid
-					if (foundDoubleColon) {
-						return false;
-					}
-					//In case it is at the start or end the one next to it will also be empty, so ignore it, otherwise we found the one
-					if (!(i === 0 && IPv6Parts[i + 1] === "") && !(i === IPv6Parts.length - 1 && IPv6Parts[i - 1] === "")) {
-						foundDoubleColon = true;
-					}
-				} else {
-					//Check that every part is valid
-					if (/^[0-9a-fA-F]{1,4}$/.exec(IPv6Parts[i]) === null) {
-						return false;
-					}
-				}
-			}
+			return true;
+		} else if (ipVersion === 6) {
 			//Do not allow loopback address for the port we are listening to.
 			const ipMinified = ip.replace(/[0|:]+/, "");
 			if (((ip.endsWith("1") && ipMinified === "1") || ip === this.client.ip) && port === this.client.port) {
@@ -459,10 +426,10 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 			if (ipMinified === "") {
 				return false;
 			}
+			return true;
+		} else { //Returns 0 for invalid ip addresses
+			return false;
 		}
-
-		//Everything was valid
-		return true;
 	}
 
 	/** Setup the connection with another peer. */
@@ -470,12 +437,12 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 		Log.debug(`Connect to peer ${this.ip}:${this.connectionPort}`);
 
 		//We opened the connection, so send the setup message.
-		if (!this.connectionIncomming) {
+		if (!this.connectionIncoming) {
 			this.connection.on("connect", () => {
 				this.send(Message.Setup, Crypto.uInt8ToBinary(Client.version), //Our version
 					Crypto.uInt8ToBinary(Client.oldestCompatibleVersion), //Oldest compatible version
 					Client.extensionFlags, //Extension flags
-					Crypto.uInt16ToBinary(this.client.port!), //The port we listen on for incomming connections
+					Crypto.uInt16ToBinary(this.client.port!), //The port we listen on for incoming connections
 					this.sendingIV); //SendingIV (possibly empty)
 				this.sendSetup = true;
 
@@ -507,7 +474,7 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 					//First 4 bytes are expected data length
 					this.expectedDataLength = Crypto.binaryToUInt32(this.currentData[0].slice(0, 4));
 
-					if (this.expectedDataLength > Math.max(this.client.config.VNODE_MAXRECEIVESIZE, this.client.blockMaxSize + 10000)) {
+					if (this.expectedDataLength > Client.MAX_MESSAGE_SIZE) {
 						this.disconnect("Peer wants to send too large of a message.");
 						return;
 					}
@@ -530,7 +497,7 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 						if (this.isSetup) {
 							this.disconnect("Peer send setup while setup is already finished.");
 							return;
-						} else if (!this.connectionIncomming) {
+						} else if (!this.connectionIncoming) {
 							this.disconnect("Peer send setup, while we are doing the setup.");
 							return;
 						} else if (data.length < 9 || (data.length < 25 && this.client.encryptionKey !== undefined)) {
@@ -568,7 +535,7 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 						if (this.isSetup) {
 							this.disconnect("Peer send setup while setup is already finished.");
 							return;
-						} else if (this.connectionIncomming) {
+						} else if (this.connectionIncoming) {
 							this.disconnect("Peer send setup response, while we should be doing the setup response.");
 							return;
 						} else if (data.length < 6 || (data.length < 22 && this.client.encryptionKey !== undefined)) {
@@ -621,9 +588,16 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 				clearTimeout(this.retrievingBlocksTimeout);
 				this.retrievingBlocksTimeout = undefined;
 			}
-			this.disconnectTime = Date.now();
-			this.setChanged();
-			this.notifyObservers();
+			if (this.disconnectPromise === undefined) {
+				this.disconnectPromise = new Promise((resolve) => {
+					this.disconnectResolve = resolve;
+				});
+			}
+			this.disconnectResolve!();
+			if (this.disconnectTime === undefined) {
+				this.disconnectTime = Date.now();
+			}
+			this.emit("disconnect", this);
 		});
 
 		/** Finished sending all messages, ready the next one. */
@@ -648,7 +622,7 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 					}, 10000);
 				}
 				//If it managed to fully drain this will be true
-				if (this.connection.write(message.data)) {
+				if (this.disconnectTime === undefined && this.connection.write(message.data)) {
 					this.connection.emit("drain");
 				}
 			}
@@ -660,15 +634,19 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 	 * @param error The error why we disconnect, or none.
 	 */
 	public async disconnect(error: string = ""): Promise<void> {
-		if (this.disconnectTime === undefined) {
+		if (this.disconnectPromise === undefined) {
 			if (error !== "") {
 				Log.warn(error);
 			}
 
 			this.disconnectTime = Date.now();
-			await new Promise((resolve) => this.connection.end("", resolve));
-			//The close event will be called once the connection has closed.
+			//Use a promise, so no matter how it disconnects this method always returns after it is disconnected
+			this.disconnectPromise = new Promise((resolve) => {
+				this.disconnectResolve = resolve;
+				this.connection.end("");
+			});
 		}
+		return this.disconnectPromise;
 	}
 
 	/**

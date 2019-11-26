@@ -1,4 +1,4 @@
-/**
+/*!
  * @license
  * Copyright Coinversable B.V. All Rights Reserved.
  *
@@ -11,6 +11,7 @@ import { VObservable } from "./observable";
 /**
  * Classical Observer interface.
  * Generics are used to make it clear what data can be received from the update method.
+ * @deprecated Use an event emitter.
  */
 export interface VObserver<T> {
 

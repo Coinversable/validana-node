@@ -83,6 +83,10 @@
 			"members"
 		],
 		//Avoid common mistakes
-		"strict-boolean-expressions": true
+		"strict-boolean-expressions": true,
+		//Wait till tslint supports typescript 3
+		"array-type": false,
+		//new Class() is not unused if the class does something on its own (e.g. start a server)
+		"no-unused-expression": [true, "allow-new"]
 	}
 }

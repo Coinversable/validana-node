@@ -1,4 +1,4 @@
-/**
+/*!
  * @license
  * Copyright Coinversable B.V. All Rights Reserved.
  *
@@ -14,7 +14,7 @@ import { ProcessorClient } from "./network/processorclient";
 import { NodeClient } from "./network/nodeclient";
 
 //What if there is an exception that was not cought
-process.on("uncaughtException", (error: Error) => {
+process.on("uncaughtException", async (error: Error) => {
 	Sandbox.unSandbox();
 	if (error.stack === undefined) {
 		error.stack = "";
@@ -25,6 +25,10 @@ process.on("uncaughtException", (error: Error) => {
 			error.message = error.message.replace(new RegExp(config.VNODE_DBPASSWORD, "g"), "");
 			error.stack = error.stack.replace(new RegExp(config.VNODE_DBPASSWORD, "g"), "");
 		}
+		if (config.VNODE_DBPASSWORD_NETWORK !== undefined) {
+			error.message = error.message.replace(new RegExp(config.VNODE_DBPASSWORD_NETWORK, "g"), "");
+			error.stack = error.stack.replace(new RegExp(config.VNODE_DBPASSWORD_NETWORK, "g"), "");
+		}
 		if (config.VNODE_SENTRYURL !== undefined) {
 			error.message = error.message.replace(new RegExp(config.VNODE_SENTRYURL, "g"), "");
 			error.stack = error.stack.replace(new RegExp(config.VNODE_SENTRYURL, "g"), "");
@@ -34,20 +38,24 @@ process.on("uncaughtException", (error: Error) => {
 			error.stack = error.stack.replace(new RegExp(config.VNODE_ENCRYPTIONKEY, "g"), "");
 		}
 	}
-	Log.fatal("uncaughtException", error).then(() => process.exit(1));
+	await Node.shutdown(1, "uncaughtException", error);
 });
-process.on("unhandledRejection", (reason: any, _: Promise<any>) => {
+process.on("unhandledRejection", async (reason: unknown, promise: Promise<unknown>) => {
 	Sandbox.unSandbox();
-	Log.fatal(`unhandledRejection: ${reason}`, new Error("unhandledRejection")).then(() => process.exit(1));
+	let error: Error | undefined;
+	await promise.catch((e) => error = e);
+	await Node.shutdown(1, `unhandledRejection: ${reason}`, error);
 });
 //Any process warnings that may be emmited
-process.on("warning", (warning: Error) => {
+process.on("warning", async (warning: Error) => {
 	const shouldSandbox = Sandbox.isSandboxed();
 	Sandbox.unSandbox();
 
 	//We only use them while in the sandbox.
-	if (warning.message.indexOf("'GLOBAL' is deprecated") === -1 && warning.message.indexOf("'root' is deprecated") === -1) {
-		Log.error("Process warning", warning);
+	if (warning.message.indexOf("'GLOBAL' is deprecated") === -1 &&
+		warning.message.indexOf("'root' is deprecated") === -1 &&
+		warning.message.indexOf("queueMicrotask() is experimental") === -1) {
+		Log.warn("Process warning", warning);
 	}
 
 	if (shouldSandbox) {
@@ -68,9 +76,18 @@ try {
 }
 
 //Set log information:
-Log.options.tags!.type = Cluster.isMaster ? "master" : process.env.worker_type!;
-Log.options.tags!.nodeVersion = "1.0.0";
+Log.options.tags.type = Cluster.isMaster ? "master" : process.env.worker_type!;
+// tslint:disable-next-line:no-var-requires
+Log.options.tags.nodeVersion = require("../package.json").version;
 Log.Level = config!.VNODE_LOGLEVEL;
+if (config!.VNODE_LOGFORMAT !== "") {
+	Log.LogFormat = config!.VNODE_LOGFORMAT;
+}
+
+//Warn about version if needed
+if (!(Number.parseInt(process.versions.node.split(".")[0], 10) <= 13)) {
+	Log.warn("Validana has not been tested for node version 14+, use at your own risk!");
+}
 
 let isShuttingDown: boolean = false;
 let isGraceful: boolean = true;
@@ -96,48 +113,54 @@ function setupMaster(): void {
 	}
 
 	//If a worker shuts down.
-	Cluster.on("exit", (worker: Cluster.Worker, code: number, _: string) => {
+	Cluster.on("exit", async (worker: Cluster.Worker, code: number, _: string) => {
 		if (code === 0) {
 			//Should only happen if master told worker to shut down, for example when we tell the master to shut down.
 			Log.info(`Worker ${worker.id}(pid: ${worker.process.pid}) exited.`);
 		} else {
-			Log.info(`Worker ${worker.id}(pid: ${worker.process.pid}) died with code ${code} `);
-			Log.error(`Worker died with code ${code} `);
+			Log.info(`Worker ${worker.id}(pid: ${worker.process.pid}) died with code ${code}`);
+			Log.error(`Worker died with code ${code}`);
 			if (code >= 50 && code < 60) {
 				//So far only db corruption or another instance already running will result in this.
-				Log.fatal("Worker signaled it should stay down due to an error it cannot recover from.");
+				await Log.fatal("Worker signaled it should stay down due to an error it cannot recover from.");
 				shutdownMaster(true, code);
 			}
 		}
 
-		//Restart worker after a 1 second timeout.
-		if (!isShuttingDown) {
-			if (worker === nodeWorker) {
-				nodeWorker = undefined;
-				setTimeout(createWorker, 1000, "node", (createdWorker: Cluster.Worker) => nodeWorker = createdWorker);
-			} else if (worker === networkWorker) {
-				networkWorker = undefined;
-				setTimeout(createWorker, 1000, "network", (createdWorker: Cluster.Worker) => networkWorker = createdWorker);
-			} else {
-				//Exit the program after logging the error
-				Log.fatal("Unknown worker exited.", undefined).then(() => process.exit(1));
+		if (worker === nodeWorker) {
+			nodeWorker = undefined;
+			if (!isShuttingDown) { //Restart worker after a 1 second timeout.
+				setTimeout(() => createWorker("node").then((createdWorker) => nodeWorker = createdWorker), 1000);
 			}
+		} else if (worker === networkWorker) {
+			networkWorker = undefined;
+			if (!isShuttingDown) { //Restart worker after a 1 second timeout.
+				setTimeout(() => createWorker("network").then((createdWorker) => networkWorker = createdWorker), 1000);
+			}
+		} else {
+			//Exit the program after logging the error
+			await Log.fatal("Unknown worker exited.");
+			process.exit(1);
 		}
 	});
 
 	let noNetworkNotification: number = 0;
 	let noNodeNotification: number = 0;
+	let executingInit: boolean = false;
 	Cluster.on("online", (worker) => worker === nodeWorker ? noNodeNotification = 0 : noNetworkNotification = 0);
 
 	//If we receive a message from the node or network process: check memory usage
-	Cluster.on("message", (worker, message) => {
+	Cluster.on("message", async (worker, message) => {
 		if (worker === nodeWorker) {
 			if (typeof message === "object" && message.type === "report" && typeof message.memory === "number") {
 				noNodeNotification = 0;
 				if (message.memory > config.VNODE_MAXMEMORYNODE) {
-					Log.error("Node process using too much memory, restarting.");
+					await Log.error("Node process using too much memory, restarting.");
 					shutdownWorker(nodeWorker.id.toString(), true);
 				}
+			} else if (typeof message === "object" && message.type === "init" && typeof message.init === "boolean") {
+				executingInit = message.init;
+				noNodeNotification = 0;
 			} else {
 				Log.error("Node process send unknown message.");
 			}
@@ -153,13 +176,14 @@ function setupMaster(): void {
 			}
 		} else {
 			//Exit the program after logging the error
-			Log.fatal("Unknown worker reported.", undefined).then(() => process.exit(1));
+			await Log.fatal("Unknown worker reported.");
+			process.exit(1);
 		}
 	});
 
 	//Check if the worker is still responding
 	setInterval(() => {
-		if (noNodeNotification >= 2 && nodeWorker !== undefined) {
+		if (noNodeNotification >= 2 && nodeWorker !== undefined && !executingInit) {
 			Log.error("Node process failed to report multiple times, restarting.");
 			shutdownWorker(nodeWorker.id.toString(), true);
 		}
@@ -172,14 +196,20 @@ function setupMaster(): void {
 	}, 30000);
 
 	//What to do if we receive a signal to shutdown
-	process.on("SIGINT", () => shutdownMaster(false));
-	process.on("SIGTERM", () => shutdownMaster(true));
+	process.on("SIGINT", () => {
+		Log.info(`Master (pid: ${process.pid}) received SIGINT`);
+		shutdownMaster(false);
+	});
+	process.on("SIGTERM", () => {
+		Log.info(`Master (pid: ${process.pid}) received SIGTERM`);
+		shutdownMaster(true);
+	});
 }
 
 /** Shutdown the master. */
 function shutdownMaster(hardkill: boolean, code: number = 0): void {
 	if (!isShuttingDown) {
-		Log.info("Master shutting down...");
+		Log.info(`Master (pid: ${process.pid}) shutting down...`);
 
 		isShuttingDown = true;
 
@@ -213,7 +243,7 @@ function setupNetwork(): void {
 
 	//If the master sends a shutdown message we do a graceful shutdown.
 	Cluster.worker.on("message", (message: string) => {
-		Log.info(`Network worker ${process.pid} received message: ${message} `);
+		Log.info(`Network worker ${Cluster.worker.id} (pid: ${process.pid}) received message: ${message}`);
 		if (message === "shutdown" && !isShuttingDown) {
 			//The node will also end the process after it is done.
 			isShuttingDown = true;
@@ -223,14 +253,14 @@ function setupNetwork(): void {
 
 	//What to do if we receive a signal to shutdown?
 	process.on("SIGTERM", () => {
-		Log.info(`Network worker ${process.pid} received SIGTERM`);
+		Log.info(`Network orker ${Cluster.worker.id} (pid: ${process.pid}) received SIGTERM`);
 		if (!isShuttingDown) {
 			isShuttingDown = true;
 			network.shutdown();
 		}
 	});
 	process.on("SIGINT", () => {
-		Log.info(`Network worker ${process.pid} received SIGINT`);
+		Log.info(`Network orker ${Cluster.worker.id} (pid: ${process.pid}) received SIGINT`);
 		if (!isShuttingDown) {
 			isShuttingDown = true;
 			network.shutdown();
@@ -253,28 +283,37 @@ function setupNode(): void {
 	node.processBlocks();
 
 	//If the master sends a shutdown message we do a graceful shutdown.
-	Cluster.worker.on("message", (message: string) => {
-		Log.info(`Node worker ${process.pid} received message: ${message} `);
+	Cluster.worker.on("message", async (message: string) => {
+		const shouldSandbox = Sandbox.isSandboxed();
+		Sandbox.unSandbox();
+
+		Log.info(`Node worker ${Cluster.worker.id} (pid: ${process.pid}) received message: ${message}`);
 		if (message === "shutdown" && !isShuttingDown) {
 			//The node will also end the process after it is done.
 			isShuttingDown = true;
-			Node.shutdown();
+			await Node.shutdown();
+		}
+
+		if (shouldSandbox) {
+			Sandbox.sandbox();
 		}
 	});
 
 	//What to do if we receive a signal to shutdown?
-	process.on("SIGTERM", () => {
-		Log.info(`Node worker ${process.pid} received SIGTERM`);
+	process.on("SIGTERM", async () => {
+		Sandbox.unSandbox();
+		Log.info(`Node worker ${Cluster.worker.id} (pid: ${process.pid}) received SIGTERM`);
 		if (!isShuttingDown) {
 			isShuttingDown = true;
-			Node.shutdown();
+			await Node.shutdown();
 		}
 	});
-	process.on("SIGINT", () => {
-		Log.info(`Node worker ${process.pid} received SIGINT`);
+	process.on("SIGINT", async () => {
+		Sandbox.unSandbox();
+		Log.info(`Node worker ${Cluster.worker.id} (pid: ${process.pid}) received SIGINT`);
 		if (!isShuttingDown) {
 			isShuttingDown = true;
-			Node.shutdown();
+			await Node.shutdown();
 		}
 	});
 }
@@ -286,9 +325,7 @@ function setupNode(): void {
 async function createWorker(type: "network" | "node", timeout: number = 5000): Promise<Cluster.Worker> {
 	try {
 		//For internal environment variables use snake_case
-		return await new Promise<Cluster.Worker>((resolve) => {
-			resolve(Cluster.fork(Object.assign(config, { worker_type: type })));
-		});
+		return Cluster.fork(Object.assign(config, { worker_type: type }));
 	} catch (error) {
 		if (timeout >= 60000) {
 			//Problem seems to not resolve itsself.
@@ -321,7 +358,7 @@ function shutdownWorker(id: string, hardkill: boolean): void {
 			}
 		});
 	} else {
-		Log.info(`Trying to shutdown non-existing worker ${id} `);
+		Log.info(`Trying to shutdown non-existing worker ${id}`);
 		Log.error("Trying to shutdown non-existing worker");
 	}
 

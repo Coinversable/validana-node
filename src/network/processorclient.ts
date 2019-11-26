@@ -1,4 +1,4 @@
-/**
+/*!
  * @license
  * Copyright Coinversable B.V. All Rights Reserved.
  *
@@ -13,9 +13,10 @@ import * as FS from "fs";
 import * as encryption from "crypto";
 import { Worker } from "cluster";
 import { Log, DBBlock, Block, Crypto } from "@coinversable/validana-core";
+import { Client as PGClient } from "pg";
 import { Config } from "../config";
 import { Client, NodeRequest, ProcessorResponse } from "./client";
-import { Peer, RetrievingBlocks } from "./peer";
+import { Peer } from "./peer";
 
 /**
  * The processor client is the network client for the processor.
@@ -26,9 +27,11 @@ export class ProcessorClient extends Client {
 	protected postgresVersion: number = 0;
 	protected infoServer: http.Server | https.Server | undefined;
 	protected isClosingInfoServer: boolean = false;
-	protected seenPeers: Array<{ ip: string, port: number, lastSeen: number, version: number, oldestCompVersion: number }> = [];
+	protected seenPeers: Array<{ ip: string, port: number, lastSeen: number, version: number, oldestCompVersion: number, IPv6: boolean }> = [];
 	protected watchingCert: boolean = false;
 	protected isReloadingCert: boolean = false;
+	protected notificationsClient: PGClient;
+	private cachingBlocksFailures: number = 0;
 
 	/** Create a new client for the processor. */
 	constructor(worker: Worker, config: Readonly<Config>) {
@@ -37,110 +40,138 @@ export class ProcessorClient extends Client {
 		this.latestExistingBlock = this.config.VNODE_LATESTEXISTINGBLOCK;
 		this.ip = "processor";
 
+		const user = this.config.VNODE_ISPROCESSOR ? this.config.VNODE_DBUSER : this.config.VNODE_DBUSER_NETWORK;
+		const password = this.config.VNODE_ISPROCESSOR ? this.config.VNODE_DBPASSWORD : this.config.VNODE_DBPASSWORD_NETWORK;
+		this.notificationsClient = new PGClient({
+			user,
+			database: this.config.VNODE_DBNAME,
+			password,
+			port: this.config.VNODE_DBPORT,
+			host: this.config.VNODE_DBHOST
+		}).on("error", (error) => {
+			error.message = error.message.replace(new RegExp(password, "g"), "");
+			Log.warn("Problem with database connection.", error);
+		}).on("end", () => {
+			setTimeout(() => this.listen(), 5000);
+		}).on("notification", (notification) => {
+			const payload: { block?: number, ts: number, txs?: number, other: number } = JSON.parse(notification.payload!);
+			if (payload.block !== undefined) {
+				this.cacheBlocks();
+			}
+		});
+
 		//Create the peer server (but do not yet start listening, this will create the info server once it starts listening)
 		this.createPeerServer();
 
 		//Retrieve the database version
-		this.getDatabaseVersion().then((version) => {
+		this.getDatabaseVersion().then(async (version) => {
 			this.postgresVersion = version;
 			//Retrieve the last known block from the database
-			this.getLatestRetrievedBlock().then((blockId) => {
-				this.latestRetrievedBlock = blockId;
-				if (blockId > this.latestExistingBlock) {
-					this.latestExistingBlock = blockId;
-				}
-				//Update with new blocks once in a while
-				this.cacheBlocks();
-				this.latestExistingBlockInterval = setInterval(() => this.cacheBlocks(), this.config.VNODE_BLOCKINTERVAL * 1000);
+			this.latestRetrievedBlock = await this.getLatestRetrievedBlock();
+			if (this.latestRetrievedBlock > this.latestExistingBlock) {
+				this.latestExistingBlock = this.latestRetrievedBlock;
+			}
+			//Update with new blocks whenever available
+			await this.cacheBlocks();
+			this.listen();
 
-				//Start the peer server
-				this.server!.listen(this.port);
-			});
+			//Start the peer server
+			this.server!.listen(this.port);
 		});
 
 		//If everything is up and running report back memory usage, otherwise we try again later...
 		setInterval(() => {
 			if (this.server !== undefined && this.server.listening && !this.isClosingServer &&
 				this.infoServer !== undefined && this.infoServer.listening && !this.isClosingInfoServer) {
-				this.worker.send({ type: "report", memory: process.memoryUsage().heapTotal / 1024 / 1024 });
+				const memory = process.memoryUsage();
+				this.worker.send({ type: "report", memory: (memory.heapTotal + memory.external) / 1024 / 1024 });
 			}
 		}, 20000);
 	}
 
-	/**
-	 * Called when a peer has new information for us.
-	 * @param o The peer that has new information.
-	 * @param arg What new information it has.
-	 */
-	public update(o: Peer, arg?: RetrievingBlocks | Array<{ ip: string, port: number }> | number): void {
-		//We only care about disconnects as the processor client
-		if (arg === undefined) {
-			//A peer disconnected
-			this.peers.splice(this.peers.indexOf(o), 1);
-			this.badPeers.push(o);
-			setTimeout(() => this.badPeers.slice(this.badPeers.indexOf(o), 1), this.config.VNODE_PEERTIMEOUT);
+	private async listen(): Promise<void> {
+		try {
+			await this.notificationsClient.connect();
+		} catch (error) {
+			//End will be called, which will create a new connection in a moment.
 		}
+		try {
+			await this.notificationsClient.query("LISTEN blocks;");
+		} catch (error) {
+			//End will be called, which will create a new connection in a moment.
+			await this.notificationsClient.end().catch(() => { });
+		}
+	}
+
+	/** Will be called when a peer disconnects. */
+	private onDisconnect(peer: Peer): void {
+		//A peer disconnected
+		this.peers.splice(this.peers.indexOf(peer), 1);
+		this.disconnectedPeers.push(peer);
+		setTimeout(() => this.disconnectedPeers.splice(this.disconnectedPeers.indexOf(peer), 1), this.config.VNODE_PEERTIMEOUT);
 	}
 
 	/**
 	 * Get what database version is being used. It will retry until it succeeds.
 	 * @param timeout The timeout after which to try again should it fail
 	 */
-	private async getDatabaseVersion(timeout = 5000): Promise<number> {
+	protected async getDatabaseVersion(timeout = 5000): Promise<number> {
 		try {
-			const result = await this.query({ text: "SELECT current_setting('server_version_num');" });
-			return result.rows[0].current_setting;
+			return (await this.query("SELECT current_setting('server_version_num');", [])).rows[0].current_setting;
 		} catch (error) {
 			Log.warn("Failed to retrieve database version", error);
 			return new Promise<number>((resolve) => setTimeout(() => resolve(this.getDatabaseVersion(Math.min(timeout * 1.5, 300000))), timeout));
 		}
 	}
 
-	/** Will get new blocks from the database and cache them. */
-	private async cacheBlocks(): Promise<void> {
-		try {
-			const result = await this.query({
-				text: "SELECT * FROM basics.blocks WHERE block_id > $1 ORDER BY block_id ASC LIMIT $2;",
-				values: [
-					//Request only new ones or if we don't have any cached block yet request older ones as well
-					this.cachedBlocks.length === 0 ? this.latestRetrievedBlock - this.config.VNODE_CACHEDBLOCKS : this.latestRetrievedBlock,
-					this.config.VNODE_CACHEDBLOCKS
-				],
-				name: "cached"
-			});
-			const blocks: DBBlock[] = result.rows;
-			if (blocks.length > 0) {
-				//Cache the blocks
-				for (const block of blocks) {
-					if (this.cachedBlocks.length === 0 || this.cachedBlocks[this.cachedBlocks.length - 1].id + 1 === block.block_id) {
-						this.cachedBlocks.push(new Block(block));
-					} else {
-						Log.error("Retrieved cached blocks with too old/new ids.");
-						this.cachedBlocks = [];
-						this.cachedBlocksStartId = -1;
-					}
-				}
-				if (this.cachedBlocks.length > this.config.VNODE_CACHEDBLOCKS) {
-					this.cachedBlocks.splice(0, this.cachedBlocks.length - this.config.VNODE_CACHEDBLOCKS);
-				}
-				this.cachedBlocksStartId = this.cachedBlocks[0].id;
+	/** Will get new blocks from the database, cache them and let peers know of new blocks. */
+	protected async cacheBlocks(): Promise<void> {
+		if (this.cachingBlocksFailures > 3) {
+			Log.error("Is still caching blocks multiple times in a row.");
+		}
+		this.cachingBlocksFailures++;
 
-				//Update latest known
-				const lastBlockId = blocks[blocks.length - 1].block_id;
-				if (lastBlockId > this.latestExistingBlock) {
-					this.latestExistingBlock = lastBlockId;
-				}
-				if (lastBlockId > this.latestRetrievedBlock) {
-					this.latestRetrievedBlock = lastBlockId;
-					for (const peer of this.peers) {
-						peer.newLatestKnown(this.latestRetrievedBlock);
-					}
-				}
-			}
+		//Get the blocks
+		let blocks: DBBlock[];
+		try {
+			blocks = (await this.query("SELECT * FROM basics.blocks WHERE block_id > $1 ORDER BY block_id;",
+				[this.cachedBlocks.length === 0 ? this.latestRetrievedBlock - Client.CACHED_BLOCKS : this.latestRetrievedBlock])).rows;
 		} catch (error) {
 			//It will be tried again because of the setInterval
-			Log.warn("Failed to retrieve database info", error);
+			return Log.warn("Failed to retrieve database info", error);
 		}
+
+		//Store the blocks in cache
+		if (blocks.length > 0) {
+			for (const block of blocks) {
+				if (this.cachedBlocks.length === 0 || this.cachedBlocks[this.cachedBlocks.length - 1].id + 1 === block.block_id) {
+					this.cachedBlocks.push(new Block(block));
+				} else {
+					Log.error("Retrieved cached blocks with too old/new ids.");
+					this.cachedBlocks.splice(0);
+					this.cachedBlocksStartId = -1;
+				}
+			}
+			if (this.cachedBlocks.length > Client.CACHED_BLOCKS) {
+				this.cachedBlocks.splice(0, this.cachedBlocks.length - Client.CACHED_BLOCKS);
+			}
+			this.cachedBlocksStartId = this.cachedBlocks[0].id;
+
+			//Update latest known
+			const lastBlockId = blocks[blocks.length - 1].block_id;
+			if (lastBlockId > this.latestExistingBlock) {
+				this.latestExistingBlock = lastBlockId;
+			}
+			if (lastBlockId > this.latestRetrievedBlock) {
+				this.latestRetrievedBlock = lastBlockId;
+				for (const peer of this.peers) {
+					peer.newLatestKnown(this.latestRetrievedBlock);
+				}
+			}
+		}
+
+		//We are finished caching blocks
+		this.cachingBlocksFailures = 0;
 	}
 
 	/**
@@ -150,7 +181,7 @@ export class ProcessorClient extends Client {
 	private createPeerServer(): void {
 		let timeout = 5000;
 
-		//Setup a server for incomming connections.
+		//Setup a server for incoming connections.
 		this.server = net.createServer();
 		this.server.maxConnections = this.config.VNODE_MAXPEERS;
 
@@ -167,9 +198,11 @@ export class ProcessorClient extends Client {
 		//If a new peer connects to us.
 		this.server.on("connection", (socket) => {
 			if (this.peers.length >= this.config.VNODE_MAXPEERS) {
-				socket.end();
+				socket.end("");
 			} else {
-				this.peers.push(new Peer(this, socket));
+				const peer = new Peer(this, socket);
+				peer.on("disconnect", this.onDisconnect.bind(this));
+				this.peers.push(peer);
 			}
 		});
 
@@ -179,18 +212,18 @@ export class ProcessorClient extends Client {
 			if (!this.server!.listening) {
 				timeout = Math.min(timeout * 1.5, 300000);
 				//We got an error while starting up
-				this.shutdownServer().then(() => setTimeout(() => {
+				this.shutdownServer().catch(() => { }).then(() => setTimeout(() => {
 					if (!this.permanentlyClosed) {
-						this.server!.listen(this.config.VNODE_LISTENPORT);
+						this.server!.listen(this.port);
 					}
-				}, timeout)).catch();
+				}, timeout));
 			} else {
 				//We got an error while we are listening
-				this.shutdownServer().then(() => setTimeout(() => {
+				this.shutdownServer().catch(() => { }).then(() => setTimeout(() => {
 					if (!this.permanentlyClosed) {
-						this.server!.listen(this.config.VNODE_LISTENPORT);
+						this.server!.listen(this.port);
 					}
-				}, timeout)).catch();
+				}, timeout));
 			}
 		});
 	}
@@ -219,9 +252,14 @@ export class ProcessorClient extends Client {
 							//Only reload if it succeeded loading the files.
 							if (newCertificate !== undefined) {
 								try {
-									//Reloading certificates is not officially supported, but it works anyway.
-									(this.infoServer as any)._sharedCreds.context.setCert(newCertificate.cert);
-									(this.infoServer as any)._sharedCreds.context.setKey(newCertificate.key);
+									if ((this.server as any).setSecureContext instanceof Function) {
+										//Available since node 11
+										(this.server as any).setSecureContext(newCertificate);
+									} else {
+										//Not officially available, but it works anyway.
+										(this.server as any)._sharedCreds.context.setCert(newCertificate.cert);
+										(this.server as any)._sharedCreds.context.setKey(newCertificate.key);
+									}
 								} catch (error) {
 									//Do not log possible certificate
 									Log.error("Problem with reloading certificate.");
@@ -235,7 +273,7 @@ export class ProcessorClient extends Client {
 
 		this.infoServer.on("listening", () => timeout = 5000);
 
-		//What to do if there is an incomming connection
+		//What to do if there is an incoming connection
 		this.infoServer.on("request", (req: http.IncomingMessage, res: http.ServerResponse) => {
 			if (req.method === "POST") {
 				let body: string = "";
@@ -245,7 +283,7 @@ export class ProcessorClient extends Client {
 					if (body.length > 10000) {
 						res.writeHead(413);
 						res.end("Payload too large.");
-						res.connection.destroy();
+						req.socket.destroy();
 						return;
 					}
 				});
@@ -269,7 +307,24 @@ export class ProcessorClient extends Client {
 						res.end("Invalid request data.");
 						return;
 					}
-					this.respond(res, req.socket.remoteAddress!, data);
+					let ip: string;
+					const forwarded = req.headers["x-forwarded-for"];
+					if (forwarded instanceof Array) {
+						ip = forwarded[0];
+					} else if (typeof forwarded === "string") {
+						const fwd = forwarded.split(",")[0].trim();
+						const splitted = fwd.split(":");
+						ip = splitted.length === 2 ? splitted[0] : fwd;
+					} else if (typeof req.socket.remoteAddress === "string") {
+						ip = req.socket.remoteAddress;
+					} else if (typeof req.socket.remoteAddress === "string") {
+						ip = req.socket.remoteAddress;
+					} else {
+						res.writeHead(400);
+						res.end("Invalid ip.");
+						return;
+					}
+					this.respond(res, ip, data);
 				});
 			} else {
 				res.writeHead(405);
@@ -284,18 +339,18 @@ export class ProcessorClient extends Client {
 			if (!this.infoServer!.listening) {
 				timeout = Math.min(timeout * 1.5, 300000);
 				//We got an error while starting up
-				this.shutdownInfoServer().then(() => setTimeout(() => {
+				this.shutdownInfoServer().catch(() => { }).then(() => setTimeout(() => {
 					if (!this.permanentlyClosed) {
 						this.infoServer!.listen(this.config.VNODE_PROCESSORPORT);
 					}
-				}, timeout)).catch();
+				}, timeout));
 			} else {
 				//We got an error while we are listening
-				this.shutdownInfoServer().then(() => setTimeout(() => {
+				this.shutdownInfoServer().catch(() => { }).then(() => setTimeout(() => {
 					if (!this.permanentlyClosed) {
 						this.infoServer!.listen(this.config.VNODE_PROCESSORPORT);
 					}
-				}, timeout)).catch();
+				}, timeout));
 			}
 		});
 
@@ -303,13 +358,14 @@ export class ProcessorClient extends Client {
 	}
 
 	/**
-	 * Respond to an incomming request for information about the blockchain.
+	 * Respond to an incoming request for information about the blockchain.
 	 * @param res The response object to use
 	 * @param data The data send with the request
 	 */
 	private respond(res: http.ServerResponse, ip: string, data: NodeRequest): void {
 		let foundPeer = false;
 		const now = Date.now();
+		const isIPv6 = ip.indexOf(":") !== -1;
 
 		//See if we have seen this peer before and also remove old peers.
 		for (let i = this.seenPeers.length - 1; i >= 0; i--) {
@@ -328,7 +384,7 @@ export class ProcessorClient extends Client {
 		}
 		//Add the peer if we haven't seen it before
 		if (!foundPeer) {
-			this.seenPeers.push({ ip, port: data.port, lastSeen: now, version: data.version, oldestCompVersion: data.oldestCompVersion });
+			this.seenPeers.push({ ip, port: data.port, lastSeen: now, version: data.version, oldestCompVersion: data.oldestCompVersion, IPv6: isIPv6 });
 		}
 
 		//Add peers from the list of peers we have recently seen.
@@ -341,7 +397,7 @@ export class ProcessorClient extends Client {
 			//If this peer is compatible and not the peer that is requesting
 			if ((nextPeer.version >= data.oldestCompVersion && nextPeer.version <= data.version ||
 				data.version >= nextPeer.oldestCompVersion && data.version <= nextPeer.version) &&
-				(nextPeer.ip !== ip || nextPeer.port !== data.port)) {
+				nextPeer.IPv6 === isIPv6 && (nextPeer.ip !== ip || nextPeer.port !== data.port)) {
 
 				//We only add the peer if we don't have enough yet or if we did not found a connected peer yet
 				let shouldAdd = newPeers.length < 5;
@@ -373,7 +429,8 @@ export class ProcessorClient extends Client {
 
 		//Construct the response
 		const responseJson: ProcessorResponse = {
-			nodeVersion: this.config.VNODE_NODEVERSION,
+			/** Version processor is assumed to use. Will lead to a warning message if this is wrong. */
+			nodeVersion: process.versions.node.split(".")[0],
 			postgresVersion: this.postgresVersion,
 			signPrefix: Crypto.binaryToUtf8(this.signPrefix),
 			blockInterval: this.config.VNODE_BLOCKINTERVAL,
@@ -385,9 +442,9 @@ export class ProcessorClient extends Client {
 
 		let responseData = Crypto.utf8ToBinary(JSON.stringify(responseJson));
 		//If needed encrypt the response
-		if (this.config.VNODE_ENCRYPTIONKEY !== "") {
+		if (this.encryptionKey !== undefined) {
 			const sendingIV = encryption.randomBytes(16);
-			const sendingCipher = encryption.createCipheriv("AES-256-CTR", this.encryptionKey!, sendingIV);
+			const sendingCipher = encryption.createCipheriv("AES-256-CTR", this.encryptionKey, sendingIV);
 			responseData = Buffer.concat([sendingIV, sendingCipher.update(responseData)]);
 			sendingCipher.final();
 		}
@@ -452,19 +509,8 @@ export class ProcessorClient extends Client {
 			promises.push(this.shutdownServer());
 		}
 
-		//Do not add promises that may reject
-		await Promise.all(promises);
-
-		if (this.client !== undefined) {
-			try {
-				await this.client.end();
-			} catch (error) {
-				Log.warn("Failed to properly shutdown database client.", error);
-				if (exitCode === 0) {
-					exitCode = 1;
-				}
-			}
-		}
+		//Close database connection
+		promises.push(this.pool.end().catch((error) => Log.warn("Failed to properly shutdown database pool.", error)));
 
 		return process.exit(exitCode);
 	}
