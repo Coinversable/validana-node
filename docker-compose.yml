@@ -19,6 +19,7 @@ services:
       VNODE_DBPASSWORD: 
       # Should be the same as database NETWORKPASS below.
       VNODE_DBPASSWORD_NETWORK: 
+      VNODE_LISTENPORT: 29473
     ports:
       # Change the left value to the port you want to expose it on, the right value is used internally.
       - "29473:29473" # Port used for incomming p2p connections.
