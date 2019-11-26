@@ -5,6 +5,7 @@ FROM node:${NODEVERSION}
 # Clone the projects into the docker container and compile it
 ENV NODE_ENV=production
 ENV NODE_NO_WARNINGS=1
+RUN yarn global add typescript
 RUN git clone https://github.com/Coinversable/validana-node.git --branch v2.1.2 /usr/node
 RUN yarn --cwd /usr/node install --frozen-lockfile
 RUN tsc -p /usr/node/tsconfig.json
