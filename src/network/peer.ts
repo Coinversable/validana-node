@@ -8,7 +8,7 @@
 
 import * as net from "net";
 import * as encryption from "crypto";
-import { Crypto, Log, Block } from "validana-core";
+import { Crypto, Log, Block } from "@coinversable/validana-core";
 import { VObservable } from "../tools/observable";
 import { Client } from "./client";
 
@@ -357,7 +357,7 @@ export class Peer extends VObservable<RetrievingBlocks | Array<{ ip: string, por
 			this.sendingCipher.final();
 			//Create a new IV
 			this.sendingIV = encryption.randomBytes(16);
-			this.sendingCipher = encryption.createCipheriv("AES-256-CTR", this.client.encryptionKey, this.sendingIV);
+			this.sendingCipher = encryption.createCipheriv("AES-256-CTR", this.client.encryptionKey!, this.sendingIV);
 			this.refreshIV = 0;
 			this.send(Message.NewIV, this.sendingIV);
 		}

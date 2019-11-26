@@ -12,7 +12,7 @@ import * as https from "https";
 import * as FS from "fs";
 import * as encryption from "crypto";
 import { Worker } from "cluster";
-import { Log, DBBlock, Block, Crypto } from "validana-core";
+import { Log, DBBlock, Block, Crypto } from "@coinversable/validana-core";
 import { Config } from "../config";
 import { Client, NodeRequest, ProcessorResponse } from "./client";
 import { Peer, RetrievingBlocks } from "./peer";
@@ -387,7 +387,7 @@ export class ProcessorClient extends Client {
 		//If needed encrypt the response
 		if (this.config.VNODE_ENCRYPTIONKEY !== "") {
 			const sendingIV = encryption.randomBytes(16);
-			const sendingCipher = encryption.createCipheriv("AES-256-CTR", this.encryptionKey, sendingIV);
+			const sendingCipher = encryption.createCipheriv("AES-256-CTR", this.encryptionKey!, sendingIV);
 			responseData = Buffer.concat([sendingIV, sendingCipher.update(responseData)]);
 			sendingCipher.final();
 		}

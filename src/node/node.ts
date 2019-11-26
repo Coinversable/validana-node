@@ -9,7 +9,7 @@
 import * as Cluster from "cluster";
 import {
 	Crypto, Log, Basic, QueryStatus, TxStatus, DBBlock, Block, Transaction, CreatePayload, DeletePayload, PublicKey
-} from "validana-core";
+} from "@coinversable/validana-core";
 import { Config } from "../config";
 
 /** The node is responsible for validating all blocks and transactions as well as building the current state depending on the transactions. */

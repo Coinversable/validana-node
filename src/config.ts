@@ -9,7 +9,7 @@
 import * as Cluster from "cluster";
 import * as FS from "fs";
 import * as Path from "path";
-import { Log, Crypto, PublicKey } from "validana-core";
+import { Log, Crypto, PublicKey } from "@coinversable/validana-core";
 
 /** The config for the node. Using all capitalized names because this is the standard for environment variables. */
 export interface Config extends StringConfig, NumberConfig, BooleanConfig { }

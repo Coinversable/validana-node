@@ -12,7 +12,7 @@ import * as https from "https";
 import * as encryption from "crypto";
 import { Worker } from "cluster";
 import { QueryConfig } from "pg";
-import { Block, Log, Crypto, PublicKey } from "validana-core";
+import { Block, Log, Crypto, PublicKey } from "@coinversable/validana-core";
 import { Config } from "../config";
 import { Client, NodeRequest, ProcessorResponse } from "./client";
 import { Peer, RetrievingBlocks } from "./peer";

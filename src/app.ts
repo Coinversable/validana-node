@@ -7,7 +7,7 @@
  */
 
 import * as Cluster from "cluster";
-import { Log, Sandbox } from "validana-core";
+import { Log, Sandbox } from "@coinversable/validana-core";
 import { Node } from "./node/node";
 import { Config, loadConfig } from "./config";
 import { ProcessorClient } from "./network/processorclient";

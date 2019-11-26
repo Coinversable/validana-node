@@ -9,7 +9,7 @@
 import * as net from "net";
 import { Worker } from "cluster";
 import { Client as DBClient, QueryResult, QueryConfig, types } from "pg";
-import { Crypto, Log, Block, DBBlock, PublicKey } from "validana-core";
+import { Crypto, Log, Block, DBBlock, PublicKey } from "@coinversable/validana-core";
 import { VObserver } from "../tools/observer";
 import { Config } from "../config";
 import { Peer, RetrievingBlocks } from "./peer";
