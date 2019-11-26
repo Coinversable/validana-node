@@ -2,7 +2,7 @@ version: "2"
 services:
   node:
     build:
-      context: https://github.com/Coinversable/validana-node.git
+      context: https://github.com/Coinversable/validana-node.git#v1.0.1
       dockerfile: Node.Dockerfile
       args:
         NODEVERSION: 10
@@ -23,7 +23,7 @@ services:
       - "29473:29473"
   database:
     build: 
-      context: https://github.com/Coinversable/validana-node.git
+      context: https://github.com/Coinversable/validana-node.git#v1.0.1
       dockerfile: DB.Dockerfile
       args:
         NODEPASS: 
@@ -37,7 +37,7 @@ services:
       - "5432"
   server:
     build: 
-      context: https://github.com/Coinversable/validana-server.git
+      context: https://github.com/Coinversable/validana-server.git#v1.0.1
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:

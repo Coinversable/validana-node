@@ -1,3 +1,5 @@
+This is the semi-annual release channel for Validana. For the latest version contact us via info@coinversable.com.
+
 About Validana.io
 =================
 
@@ -27,7 +29,6 @@ Setup Development environment
 -----------------------------
 1. Install Node.js 7.6 or later (https://nodejs.org/en/download/) (Make sure to use the same version as the Processor!)
 2. Install yarn (https://yarnpkg.com/en/docs/install)
-3. Run `yarn global add typescript tslint`
 
 Setup Validana Node
 -------------------

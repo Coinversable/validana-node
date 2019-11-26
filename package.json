@@ -1,11 +1,11 @@
 {
-	"name": "validana-node",
-	"version": "1.0.0",
+	"name": "@coinversable/validana-node",
+	"version": "1.0.1",
 	"private": true,
 	"description": "The Validana node for verifying blocks and transactions.",
 	"author": "Coinversable BV",
 	"homepage": "https://validana.io/",
-	"license": "GNU AGPLv3",
+	"license": "AGPL-3.0-only",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/Coinversable/validana-node.git"
@@ -23,12 +23,14 @@
 		"tslint": "tslint --project tsconfig.json -c tslint.json src/**/*.ts"
 	},
 	"dependencies": {
+		"@coinversable/validana-core": "^1.0.1",
 		"@types/node": "*",
 		"@types/pg": "^7.4.5",
-		"pg": "^7.4.1",
-		"validana-core": "git://github.com/Coinversable/validana-core.git#v1.0.0"
+		"pg": "^7.4.1"
 	},
 	"devDependencies": {
-		"source-map-support": "^0.5.4"
+		"source-map-support": "^0.5.4",
+		"tslint": "^5.0.0",
+		"typescript": "^3.0.0"
 	}
 }
