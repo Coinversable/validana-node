@@ -55,6 +55,7 @@ services:
     environment:
       VSERVER_DBNAME: blockchain_node
       VSERVER_DBHOST: database
+      VSERVER_CACHING: 'false'
       # Should be the same as database BACKENDPASS above.
       VSERVER_DBPASSWORD: 
       # If you want to copy the key/cert files into the container download the Dockerfile and edit it manually.
