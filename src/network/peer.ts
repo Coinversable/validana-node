@@ -571,6 +571,8 @@ export class Peer extends EventEmitter {
 			//Peer is/went offline, not an error
 			if (error.message.indexOf("ECONNREFUSED") === -1 && error.message.indexOf("ECONNRESET") === -1) {
 				Log.warn(`Connection to peer ${this.ip}:${this.connectionPort} errored`, error);
+			} else {
+				Log.info(`Connection to peer ${this.ip}:${this.connectionPort} failed`, error);
 			}
 		});
 
@@ -633,7 +635,7 @@ export class Peer extends EventEmitter {
 	 * Called if we disconnect, if the other party disconnects the connection.on("close") will be called instead.
 	 * @param error The error why we disconnect, or none.
 	 */
-	public async disconnect(error: string = ""): Promise<void> {
+	public disconnect(error: string = ""): Promise<void> {
 		if (this.disconnectPromise === undefined) {
 			if (error !== "") {
 				Log.warn(error);

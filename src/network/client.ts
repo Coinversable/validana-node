@@ -189,12 +189,14 @@ export abstract class Client {
 			}
 		} else {
 			this.isClosingServer = true;
-			return new Promise<void>((resolve) => {
-				this.server!.close(() => {
-					this.isClosingServer = false;
-					resolve();
+			if (this.server !== undefined) {
+				return new Promise<void>((resolve) => {
+					this.server!.close(() => {
+						this.isClosingServer = false;
+						resolve();
+					});
 				});
-			});
+			}
 		}
 	}
 
@@ -203,15 +205,15 @@ export abstract class Client {
 		this.permanentlyClosed = true;
 		const promises: Array<Promise<void>> = [];
 
-		//Disconnect from all peers, the server will wait till there are no more open connections before calling the close callback.
-		for (const peer of this.peers) {
-			promises.push(peer.disconnect(undefined));
-		}
-
 		//We may already be closing the servers, but it will not be restarted twice anyway considering we are shutting down.
 		if (this.server !== undefined && this.server.listening) {
 			this.isClosingServer = true;
 			promises.push(this.shutdownServer());
+		}
+
+		//Disconnect from all peers, the server will wait till there are no more open connections before calling the close callback.
+		for (const peer of this.peers) {
+			promises.push(peer.disconnect(undefined));
 		}
 
 		//Close database connection

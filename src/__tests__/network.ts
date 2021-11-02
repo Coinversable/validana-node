@@ -10,7 +10,9 @@ import { execSync } from "child_process";
 const testdbName = "validana_automatictest_node";
 const testdbName2 = "validana_automatictest_node2";
 const testUser = "validana_automatictest";
+const testUserNetwork = "validana_automatictest2";
 const testPassword = "validana_automatictest";
+const testPasswordNetwork = "validana_automatictest2";
 const postgresPassword = "postgres";
 
 //Helper classes
@@ -27,6 +29,27 @@ class PCTest extends ProcessorClient {
 	public clearInterval(): void {
 		clearInterval(this.latestExistingBlockInterval!);
 	}
+
+	public async reset(): Promise<void> {
+		if (this.latestExistingBlockInterval !== undefined) {
+			clearInterval(this.latestExistingBlockInterval);
+		}
+		this.permanentlyClosed = true;
+		const promises: Array<Promise<void>> = [];
+		for (const peer of this.peers) {
+			promises.push(peer.disconnect(undefined));
+		}
+		if (this.infoServer !== undefined && this.infoServer.listening) {
+			this.isClosingInfoServer = true;
+			promises.push(this.shutdownInfoServer());
+		}
+		if (this.server !== undefined && this.server.listening) {
+			this.isClosingServer = true;
+			promises.push(this.shutdownServer());
+		}
+		promises.push(this.pool.end().catch((error) => Log.warn("Failed to properly shutdown database pool.", error)));
+		await Promise.all(promises).catch(() => { });
+	}
 }
 class NCTest extends NodeClient {
 	private static toReset: NCTest[] = [];
@@ -34,18 +57,8 @@ class NCTest extends NodeClient {
 		super(worker, config);
 		NCTest.toReset.push(this);
 	}
-	public static async reset(): Promise<void> {
-		const promises = [];
-		for (const nc of NCTest.toReset) {
-			if (nc.latestExistingBlockInterval !== undefined) {
-				clearInterval(nc.latestExistingBlockInterval);
-			}
-			for (const peer of nc.peers) {
-				promises.push(peer.disconnect());
-			}
-			nc.pool.end();
-			nc.shutdownServer();
-		}
+	public static async resetAll(): Promise<void> {
+		const promises = NCTest.toReset.map((nc) => nc.reset());
 		NCTest.toReset = [];
 		await Promise.all(promises);
 	}
@@ -53,13 +66,17 @@ class NCTest extends NodeClient {
 		if (this.latestExistingBlockInterval !== undefined) {
 			clearInterval(this.latestExistingBlockInterval);
 		}
-		const promises: any[] = [];
-		for (const peer of this.peers) {
-			promises.push(peer.disconnect());
+
+		this.permanentlyClosed = true;
+		const promises: Array<Promise<void>> = [];
+		if (this.server !== undefined && this.server.listening) {
+			this.isClosingServer = true;
+			promises.push(this.shutdownServer());
 		}
-		this.pool.end();
-		this.shutdownServer();
-		NCTest.toReset.splice(NCTest.toReset.indexOf(this), 1);
+		for (const peer of this.peers) {
+			promises.push(peer.disconnect(undefined));
+		}
+		promises.push(this.pool.end().catch((error) => Log.warn("Failed to properly shutdown database pool.", error)));
 		await Promise.all(promises);
 	}
 	protected async query(query: string, values?: any[]): Promise<QueryResult> {
@@ -67,7 +84,7 @@ class NCTest extends NodeClient {
 			return await this.pool.query(query, values);
 		} catch (e) {
 			//So we can use multiple nodes with the same database
-			if (e.message.indexOf("value violates unique constraint")) {
+			if ((e.message as string).indexOf("value violates unique constraint")) {
 				return {} as any;
 			}
 			throw e;
@@ -131,8 +148,8 @@ const configProc = {
 	VNODE_MAXPEERS: 3,
 	VNODE_PEERTIMEOUT: 60,
 	VNODE_TLS: false,
-	VNODE_DBUSER_NETWORK: testUser,
-	VNODE_DBPASSWORD_NETWORK: testPassword,
+	VNODE_DBUSER_NETWORK: testUserNetwork,
+	VNODE_DBPASSWORD_NETWORK: testPasswordNetwork,
 	VNODE_PROCESSORHOST: "localhost",
 	VNODE_PROCESSORPORT: 49472,
 	VNODE_MAXBLOCKSIZE: 1000000,
@@ -149,7 +166,7 @@ let pc: PCTest;
 //Only do integration tests if set
 if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 	describe("Node", () => {
-		beforeAll(async (done) => {
+		beforeAll(async () => {
 			for (const dbName of [testdbName, testdbName2]) {
 				try { //Create the test database
 					const setupClient = new Client({ user: "postgres", password: postgresPassword, database: "postgres", port: 5432, host: "localhost" });
@@ -158,8 +175,8 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 					await setupClient.end();
 				} catch (error) { } //In case the database already existed: do nothing
 				try { //Fix connection limit and user rights
-					execSync(`psql -U postgres -d ${dbName} -v node_username=${testUser} -v node_password=${testPassword} -v network_username=${testUser} ` +
-						`-v network_password=${testPassword} -v backend_username=${testUser} -v backend_password=${testPassword} -f FullSetupDB.sql`,
+					execSync(`psql -U postgres -d ${dbName} -v node_username=${testUser} -v node_password=${testPassword} -v network_username=${testUserNetwork} ` +
+						`-v network_password=${testPasswordNetwork} -v backend_username=${testUser} -v backend_password=${testPassword} -f FullSetupDB.sql`,
 						{ env: Object.assign({ PGPASSWORD: postgresPassword }, process.env), stdio: "ignore" });
 					const setupClient = new Client({ user: "postgres", password: postgresPassword, database: testdbName, port: 5432, host: "localhost" });
 					await setupClient.connect();
@@ -191,19 +208,16 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 
 			//Do not spam console output
 			Log.Level = Log.Fatal;
-
-			done();
 		});
 
-		afterAll(async (done) => {
+		afterAll(async () => {
 			await pc.shutdownInfoServer();
 			await pc.shutdownServer();
-			await pc.clearInterval();
-			done();
+			pc.clearInterval();
 		});
 
 		describe("Setup", () => {
-			afterEach(async (done) => {
+			afterEach(async () => {
 				previousBlock = undefined;
 				//Reset any data if needed
 				const resetData =
@@ -212,44 +226,39 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 					`DELETE FROM basics.contracts;`;
 				await helperClient.query(resetData);
 				await helperClient2.query(resetData);
-				await NCTest.reset();
+				await NCTest.resetAll();
 				if (pc !== undefined) {
 					pc.clearCache();
 				}
-				done();
 			});
 
-			it("empty block", async (done) => {
+			it("empty block", async () => {
 				new NCTest(dummyWorker, configNode);
 				await insertBlock([], true);
 				expect<any>(await latestBlock()).not.toBe(undefined);
-				done();
 			});
 
-			it("new block", async (done) => {
+			it("new block", async () => {
 				new NCTest(dummyWorker, configNode);
 				await insertBlock([], true);
 				expect<any>(await latestBlock()).not.toBe(undefined);
 				await insertBlock([], true);
 				expect((await latestBlock()).block_id).toBe(1);
-				done();
 			});
 
-			it("Encryption key", async (done) => {
+			it("Encryption key", async () => {
 				const key = Crypto.binaryToHex(Crypto.sha256(Math.random().toString()));
 				const configProcSpecial = Object.assign({}, configProc, { VNODE_PROCESSORPORT: 49473, VNODE_ENCRYPTIONKEY: key });
 				const configNodeSpecial = Object.assign({}, configNode, { VNODE_PROCESSORPORT: 49473, VNODE_ENCRYPTIONKEY: key });
 				const pcSpecial = new PCTest(dummyWorker as any, configProcSpecial as any);
+				await new Promise((resolve) => setTimeout(resolve, 500)); //Give a moment to setup
 				new NCTest(dummyWorker, configNodeSpecial);
 				await insertBlock([], true);
 				expect<any>(await latestBlock()).not.toBe(undefined);
-				pcSpecial.shutdownInfoServer();
-				pcSpecial.shutdownServer();
-				pcSpecial!.clearInterval();
-				done();
+				await pcSpecial.reset();
 			});
 
-			it("cache", async (done) => {
+			it("cache", async () => {
 				new NCTest(dummyWorker, configNode);
 				await Promise.all([
 					insertBlock([]), insertBlock([]), insertBlock([]), insertBlock([]), insertBlock([]), insertBlock([]),
@@ -257,10 +266,9 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 				]);
 				expect(pc.getCachedBlocks().length === 10);
 				expect((await latestBlock()).block_id).toBe(11);
-				done();
 			});
 
-			it("multiple peers", async (done) => {
+			it("multiple peers", async () => {
 				const nc = new NCTest(dummyWorker, configNode);
 				new NCTest(dummyWorker, configNode); //Alleen deze laten inserten, de rest niet
 				new NCTest(dummyWorker, configNode);
@@ -270,11 +278,9 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 				await Promise.all([insertBlock([]), insertBlock([]), insertBlock([]), insertBlock([]), insertBlock([]), insertBlock([]), insertBlock([], true)]);
 				expect(pc.getCachedBlocks().length === 1);
 				expect((await latestBlock()).block_id).toBe(6);
-				await nc.reset();
-				await nc2.reset();
+				await Promise.all([nc.reset(), nc2.reset()]);
 				await insertBlock([], true);
 				expect((await latestBlock()).block_id).toBe(7);
-				done();
 			});
 		});
 	});

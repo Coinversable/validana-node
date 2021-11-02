@@ -12,7 +12,9 @@ types.setTypeParser(20, (val: string) => Number.parseInt(val, 10));
 types.setTypeParser(1016, (val: string) => val.length === 2 ? [] : val.slice(1, -1).split(",").map((v) => Number.parseInt(v, 10)));
 const testdbName = "validana_automatictest_node";
 const testUser = "validana_automatictest";
+const testUserNetwork = "validana_automatictest2";
 const testPassword = "validana_automatictest";
+const testPasswordNetwork = "validana_automatictest2";
 const postgresPassword = "postgres";
 
 //Helper class for executing tests
@@ -90,6 +92,8 @@ const conf = {
 	VNODE_DBUSER: testUser,
 	VNODE_DBPASSWORD: testPassword,
 	VNODE_DBNAME: testdbName,
+	VNODE_DBUSER_NETWORK: testUserNetwork,
+	VNODE_DBPASSWORD_NETWORK: testPasswordNetwork,
 	VNODE_DBPORT: 5432,
 	VNODE_DBHOST: "localhost",
 	VNODE_SIGNPREFIX: signPrefix.toString(),
@@ -119,7 +123,7 @@ let helperClient: Client;
 //Only do integration tests if set
 if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 	describe("Node", () => {
-		beforeAll(async (done) => {
+		beforeAll(async () => {
 			try { //Create the test database
 				const setupClient = new Client({ user: "postgres", password: postgresPassword, database: "postgres", port: 5432, host: "localhost" });
 				await setupClient.connect();
@@ -150,18 +154,15 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 
 			//Do not spam console output
 			Log.Level = Log.Fatal;
-
-			done();
 		});
 
-		afterAll(async (done) => {
+		afterAll(async () => {
 			await helperClient.end();
 			await NodeTest.endConnection();
-			done();
 		});
 
 		describe("Setup", () => {
-			afterEach(async (done) => {
+			afterEach(async () => {
 				node.clearTimeout();
 				previousBlock = undefined;
 				const resetData =
@@ -171,19 +172,17 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 					`DELETE FROM basics.info WHERE key = 'currentBlock';`;
 				await helperClient.query(resetData);
 				await NodeTest.endConnection();
-				done();
 			});
 
-			it("Still processing", async (done) => {
+			it("Still processing", async () => {
 				await insertBlock([]);
 				await Promise.all([
 					node.processBlocks(),
 					node.processBlocks()
 				]);
 				expect((await latestBlock()).block_id).toBe(0);
-				done();
 			});
-			it("Error load previous block", async (done) => {
+			it("Error load previous block", async () => {
 				const contractCode = "return 'a89hwf';";
 				const id = Transaction.generateId();
 				await insertBlock(Transaction.sign(Object.assign({}, tx, {
@@ -209,9 +208,8 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 				expect<any>(await txById(id2)).toBe(undefined);
 				await node.processBlocks();
 				expect((await txById(id2)).status).toBe("accepted");
-				done();
 			});
-			it("Error everywhere", async (done) => {
+			it("Error everywhere", async () => {
 				const contractCode = "await query('SELECT 1;', []); return 'as8ydh9gfn';";
 				const id = Transaction.generateId();
 				await insertBlock(Transaction.sign(Object.assign({}, tx, {
@@ -231,9 +229,8 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 				//And then it should finally succeed
 				await node.processBlocks();
 				expect((await txById(id)).status).toBe("accepted");
-				done();
 			});
-			it("Error rollback", async (done) => {
+			it("Error rollback", async () => {
 				const contractCode = "return 'a89hwf';";
 				const contractHash = Crypto.hash256(contractCode);
 				//Create a new contract, which fails to commit
@@ -256,9 +253,8 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 				}), signPrefix, privateKey));
 				await node.processBlocks();
 				expect((await txById(id2)).contract_type).toBe("bla");
-				done();
 			});
-			it("Has previous block", async (done) => {
+			it("Has previous block", async () => {
 				expect<any>(await latestBlock()).toBe(undefined);
 				await node.processBlocks();
 				await insertBlock([]);
@@ -266,12 +262,11 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 				await NodeTest.endConnection();
 				await insertBlock([]);
 				expect((await latestBlock()).block_id).toBe(1);
-				done();
 			});
 		});
 
 		describe("Process Blocks", () => {
-			afterEach(async (done) => {
+			afterEach(async () => {
 				node.clearTimeout();
 				previousBlock = undefined;
 				const resetData =
@@ -281,11 +276,9 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 					`DELETE FROM basics.info WHERE key = 'currentBlock';`;
 				await helperClient.query(resetData);
 				await NodeTest.endConnection();
-
-				done();
 			});
 
-			it("Simple Tx", async (done) => {
+			it("Simple Tx", async () => {
 				const contractCode = "return '1';";
 				await insertBlock([Transaction.sign(Object.assign({}, tx, {
 					transaction_id: Transaction.generateId(),
@@ -301,9 +294,8 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 				}), signPrefix, privateKey)]);
 				await node.processBlocks();
 				expect((await latestBlock()).transactions_amount).toBe(2);
-				done();
 			});
-			it("valid, invalid, valid", async (done) => {
+			it("valid, invalid, valid", async () => {
 				const contractCode = "return '1'; //aoisdfhj";
 				const id1 = Transaction.generateId();
 				await insertBlock(Transaction.sign(Object.assign({}, tx, {
@@ -333,9 +325,8 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 				}), signPrefix, privateKey));
 				await node.processBlocks();
 				expect<any>(await txById(id2)).toBe(undefined);
-				done();
 			});
-			it("delete + unknown", async (done) => {
+			it("delete + unknown", async () => {
 				const contractCode = "return 'Not ok';";
 				const id2 = Transaction.generateId();
 				const id3 = Transaction.generateId();
@@ -360,9 +351,8 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 				expect((await txById(id3)).status).toBe("rejected");
 				expect((await txById(id3)).contract_type).toBe("Unknown");
 				expect((await latestBlock()).transactions_amount).toBe(3);
-				done();
 			});
-			it("single invalid", async (done) => {
+			it("single invalid", async () => {
 				const contractCode = "return else";
 				const id1 = Transaction.generateId();
 				await insertBlock(Transaction.sign(Object.assign({}, tx, {
@@ -374,9 +364,8 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 				}), signPrefix, privateKey));
 				await node.processBlocks();
 				expect<any>(await txById(id1)).toBe(undefined);
-				done();
 			});
-			it("rejected v1", async (done) => {
+			it("rejected v1", async () => {
 				const contractCode = "return 'Not ok';";
 				const id2 = Transaction.generateId();
 				await insertBlock([Transaction.sign(Object.assign({}, tx, {
@@ -394,9 +383,8 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 				await node.processBlocks();
 				expect((await txById(id2)).status).toBe("rejected");
 				expect((await latestBlock()).transactions_amount).toBe(2);
-				done();
 			});
-			it("rejected v2", async (done) => {
+			it("rejected v2", async () => {
 				const contractCode = "return reject('bla');";
 				const id2 = Transaction.generateId();
 				await insertBlock([Transaction.sign(Object.assign({}, tx, {
@@ -414,7 +402,6 @@ if (process.env.integration === "true" || process.env.INTEGRATION === "true") {
 				await node.processBlocks();
 				expect((await txById(id2)).status).toBe("rejected");
 				expect((await latestBlock()).transactions_amount).toBe(2);
-				done();
 			});
 		});
 	});

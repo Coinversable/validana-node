@@ -2,10 +2,10 @@ version: "2"
 services:
   node:
     build:
-      context: https://github.com/Coinversable/validana-node.git#v2.1.2
+      context: https://github.com/Coinversable/validana-node.git#v2.2.0
       dockerfile: Node.Dockerfile
       args:
-        NODEVERSION: 12
+        NODEVERSION: 16
     restart: unless-stopped
     environment:
       VNODE_DBHOST: database
@@ -25,11 +25,11 @@ services:
       - "29473:29473" # Port used for incomming p2p connections.
   database:
     build: 
-      context: https://github.com/Coinversable/validana-node.git#v2.1.2
+      context: https://github.com/Coinversable/validana-node.git#v2.2.0
       dockerfile: DB.Dockerfile
       args:
         # Use the same version as the processor uses
-        POSTGRESVERSION: 12
+        POSTGRESVERSION: 14
         # The nodepass and networkpass are to be used by the node only.
         # Changing this afterwards requires removing the docker volume (containing all data!) or manually connecting to postgres and updating the password.
         NODEPASS: 
@@ -51,11 +51,12 @@ services:
       # The server you wish to use.
       context: https://github.com/Coinversable/validana-server.git#v2.1.1
       dockerfile: Dockerfile
+      args:
+        NODEVERSION: 16
     restart: unless-stopped
     environment:
       VSERVER_DBNAME: blockchain_node
       VSERVER_DBHOST: database
-      VSERVER_CACHING: 'false'
       # Should be the same as database BACKENDPASS above.
       VSERVER_DBPASSWORD: 
       # If you want to copy the key/cert files into the container download the Dockerfile and edit it manually.

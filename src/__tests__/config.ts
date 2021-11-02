@@ -7,6 +7,7 @@ describe("Config", () => {
 
 	//Base config with a value for all required keys.
 	process.env.VNODE_DBPASSWORD = "test";
+	process.env.VNODE_DBPASSWORD_NETWORK = "test2";
 	process.env.VNODE_PUBLICKEY = PrivateKey.generate().publicKey.toString("hex");
 	process.env.VNODE_PROCESSORHOST = "localhost";
 

@@ -179,53 +179,55 @@ export class ProcessorClient extends Client {
 	 * Will also create the info server once it starts listening.
 	 */
 	private createPeerServer(): void {
-		let timeout = 5000;
+		if (!this.isClosingServer || this.permanentlyClosed) {
+			let timeout = 5000;
 
-		//Setup a server for incoming connections.
-		this.server = net.createServer();
-		this.server.maxConnections = this.config.VNODE_MAXPEERS;
+			//Setup a server for incoming connections.
+			this.server = net.createServer();
+			this.server.maxConnections = this.config.VNODE_MAXPEERS;
 
-		this.server.on("listening", () => {
-			timeout = 5000;
-			//In case no port was specified we set it to the port that was giving.
-			this.port = (this.server!.address() as net.AddressInfo).port;
-			//Setup the info server if this is the first time
-			if (this.infoServer === undefined) {
-				this.createInfoServer();
-			}
-		});
+			this.server.on("listening", () => {
+				timeout = 5000;
+				//In case no port was specified we set it to the port that was giving.
+				this.port = (this.server!.address() as net.AddressInfo).port;
+				//Setup the info server if this is the first time
+				if (this.infoServer === undefined) {
+					this.createInfoServer();
+				}
+			});
 
-		//If a new peer connects to us.
-		this.server.on("connection", (socket) => {
-			if (this.peers.length >= this.config.VNODE_MAXPEERS) {
-				socket.end("");
-			} else {
-				const peer = new Peer(this, socket);
-				peer.on("disconnect", this.onDisconnect.bind(this));
-				this.peers.push(peer);
-			}
-		});
+			//If a new peer connects to us.
+			this.server.on("connection", (socket) => {
+				if (this.peers.length >= this.config.VNODE_MAXPEERS || this.isClosingServer) {
+					socket.end("");
+				} else {
+					const peer = new Peer(this, socket);
+					peer.on("disconnect", this.onDisconnect.bind(this));
+					this.peers.push(peer);
+				}
+			});
 
-		//Restart the server in a bit after an error.
-		this.server.on("error", (error) => {
-			Log.warn("Peer server error", error);
-			if (!this.server!.listening) {
-				timeout = Math.min(timeout * 1.5, 300000);
-				//We got an error while starting up
-				this.shutdownServer().catch(() => { }).then(() => setTimeout(() => {
-					if (!this.permanentlyClosed) {
-						this.server!.listen(this.port);
-					}
-				}, timeout));
-			} else {
-				//We got an error while we are listening
-				this.shutdownServer().catch(() => { }).then(() => setTimeout(() => {
-					if (!this.permanentlyClosed) {
-						this.server!.listen(this.port);
-					}
-				}, timeout));
-			}
-		});
+			//Restart the server in a bit after an error.
+			this.server.on("error", (error) => {
+				Log.warn("Peer server error", error);
+				if (!this.server!.listening) {
+					timeout = Math.min(timeout * 1.5, 300000);
+					//We got an error while starting up
+					this.shutdownServer().catch(() => { }).then(() => setTimeout(() => {
+						if (!this.permanentlyClosed) {
+							this.server!.listen(this.port);
+						}
+					}, timeout));
+				} else {
+					//We got an error while we are listening
+					this.shutdownServer().catch(() => { }).then(() => setTimeout(() => {
+						if (!this.permanentlyClosed) {
+							this.server!.listen(this.port);
+						}
+					}, timeout));
+				}
+			});
+		}
 	}
 
 	/**
@@ -511,6 +513,8 @@ export class ProcessorClient extends Client {
 
 		//Close database connection
 		promises.push(this.pool.end().catch((error) => Log.warn("Failed to properly shutdown database pool.", error)));
+
+		await Promise.all(promises).catch(() => { });
 
 		return process.exit(exitCode);
 	}

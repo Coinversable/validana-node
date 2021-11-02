@@ -6,12 +6,14 @@
  * found in the LICENSE file at https://validana.io/license
  */
 
-import * as Cluster from "cluster";
 import { Log, Sandbox } from "@coinversable/validana-core";
 import { Node } from "./node/node";
 import { Config, loadConfig } from "./config";
 import { ProcessorClient } from "./network/processorclient";
 import { NodeClient } from "./network/nodeclient";
+import { Cluster as ClusterType, Worker } from "cluster";
+// eslint-disable-next-line
+const Cluster: ClusterType = require("cluster");
 
 //What if there is an exception that was not cought
 process.on("uncaughtException", async (error: Error) => {
@@ -47,7 +49,7 @@ process.on("unhandledRejection", async (reason: unknown, promise: Promise<unknow
 	await Node.shutdown(1, `unhandledRejection: ${reason}`, error);
 });
 //Any process warnings that may be emmited
-process.on("warning", async (warning: Error) => {
+process.on("warning", (warning: Error) => {
 	const shouldSandbox = Sandbox.isSandboxed();
 	Sandbox.unSandbox();
 
@@ -77,7 +79,7 @@ try {
 
 //Set log information:
 Log.options.tags.type = Cluster.isMaster ? "master" : process.env.worker_type!;
-// tslint:disable-next-line:no-var-requires
+//eslint-disable-next-line @typescript-eslint/no-var-requires
 Log.options.tags.nodeVersion = require("../package.json").version;
 Log.Level = config!.VNODE_LOGLEVEL;
 if (config!.VNODE_LOGFORMAT !== "") {
@@ -85,8 +87,8 @@ if (config!.VNODE_LOGFORMAT !== "") {
 }
 
 //Warn about version if needed
-if (!(Number.parseInt(process.versions.node.split(".")[0], 10) <= 13)) {
-	Log.warn("Validana has not been tested for node version 14+, use at your own risk!");
+if (!(Number.parseInt(process.versions.node.split(".")[0], 10) <= 16)) {
+	Log.warn("Validana has not been tested for node version 17+, use at your own risk!");
 }
 
 let isShuttingDown: boolean = false;
@@ -105,15 +107,15 @@ if (Cluster.isMaster) {
 function setupMaster(): void {
 	//Everything loaded correctly, notify user the process is running and create the worker.
 	Log.info(`Master(pid: ${process.pid}) is running`);
-	let networkWorker: Cluster.Worker | undefined;
-	let nodeWorker: Cluster.Worker | undefined;
+	let networkWorker: Worker | undefined;
+	let nodeWorker: Worker | undefined;
 	createWorker("network").then((worker) => networkWorker = worker);
 	if (!config.VNODE_ISPROCESSOR) {
 		createWorker("node").then((worker) => nodeWorker = worker);
 	}
 
 	//If a worker shuts down.
-	Cluster.on("exit", async (worker: Cluster.Worker, code: number, _: string) => {
+	Cluster.on("exit", async (worker, code) => {
 		if (code === 0) {
 			//Should only happen if master told worker to shut down, for example when we tell the master to shut down.
 			Log.info(`Worker ${worker.id}(pid: ${worker.process.pid}) exited.`);
@@ -215,12 +217,12 @@ function shutdownMaster(hardkill: boolean, code: number = 0): void {
 
 		//Send shutdown signal to all workers.
 		isGraceful = true;
-		for (const id of Object.keys(Cluster.workers)) {
+		for (const id of Object.keys(Cluster.workers!)) {
 			shutdownWorker(id, hardkill);
 		}
 
 		setInterval(() => {
-			if (Object.keys(Cluster.workers).length === 0) {
+			if (Object.keys(Cluster.workers!).length === 0) {
 				Log.info("Shutdown completed");
 				process.exit(code === 0 && !isGraceful ? 1 : code);
 			}
@@ -230,20 +232,21 @@ function shutdownMaster(hardkill: boolean, code: number = 0): void {
 
 /** Setup the network worker. This worker is responsible for downloading new blocks. */
 function setupNetwork(): void {
+	const worker = Cluster.worker!;
 	//If this process encounters an error when being created/destroyed. We do not do a graceful shutdown in this case.
-	Cluster.worker.on("error", (error) => {
+	worker.on("error", (error) => {
 		Log.error("Network worker encountered an error", error);
 
 		process.exit(1);
 	});
 
-	Log.info(`Network worker ${Cluster.worker.id} (pid: ${process.pid}) started`);
+	Log.info(`Network worker ${worker.id} (pid: ${process.pid}) started`);
 
-	const network = config.VNODE_ISPROCESSOR ? new ProcessorClient(Cluster.worker, config) : new NodeClient(Cluster.worker, config);
+	const network = config.VNODE_ISPROCESSOR ? new ProcessorClient(worker, config) : new NodeClient(worker, config);
 
 	//If the master sends a shutdown message we do a graceful shutdown.
-	Cluster.worker.on("message", (message: string) => {
-		Log.info(`Network worker ${Cluster.worker.id} (pid: ${process.pid}) received message: ${message}`);
+	worker.on("message", (message: string) => {
+		Log.info(`Network worker ${worker.id} (pid: ${process.pid}) received message: ${message}`);
 		if (message === "shutdown" && !isShuttingDown) {
 			//The node will also end the process after it is done.
 			isShuttingDown = true;
@@ -253,14 +256,14 @@ function setupNetwork(): void {
 
 	//What to do if we receive a signal to shutdown?
 	process.on("SIGTERM", () => {
-		Log.info(`Network orker ${Cluster.worker.id} (pid: ${process.pid}) received SIGTERM`);
+		Log.info(`Network orker ${worker.id} (pid: ${process.pid}) received SIGTERM`);
 		if (!isShuttingDown) {
 			isShuttingDown = true;
 			network.shutdown();
 		}
 	});
 	process.on("SIGINT", () => {
-		Log.info(`Network orker ${Cluster.worker.id} (pid: ${process.pid}) received SIGINT`);
+		Log.info(`Network orker ${worker.id} (pid: ${process.pid}) received SIGINT`);
 		if (!isShuttingDown) {
 			isShuttingDown = true;
 			network.shutdown();
@@ -270,24 +273,25 @@ function setupNetwork(): void {
 
 /** Setup the node worker. This worker is responsible for validating and processing blocks and transactions. */
 function setupNode(): void {
+	const worker = Cluster.worker!;
 	//If this process encounters an error when being created/destroyed. We do not do a graceful shutdown in this case.
-	Cluster.worker.on("error", (error) => {
+	worker.on("error", (error) => {
 		Log.error("Node worker encountered an error", error);
 
 		process.exit(1);
 	});
 
-	Log.info(`Node worker ${Cluster.worker.id} (pid: ${process.pid}) started`);
+	Log.info(`Node worker ${worker.id} (pid: ${process.pid}) started`);
 
-	const node = new Node(Cluster.worker, config);
+	const node = new Node(worker, config);
 	node.processBlocks();
 
 	//If the master sends a shutdown message we do a graceful shutdown.
-	Cluster.worker.on("message", async (message: string) => {
+	worker.on("message", async (message: string) => {
 		const shouldSandbox = Sandbox.isSandboxed();
 		Sandbox.unSandbox();
 
-		Log.info(`Node worker ${Cluster.worker.id} (pid: ${process.pid}) received message: ${message}`);
+		Log.info(`Node worker ${worker.id} (pid: ${process.pid}) received message: ${message}`);
 		if (message === "shutdown" && !isShuttingDown) {
 			//The node will also end the process after it is done.
 			isShuttingDown = true;
@@ -302,7 +306,7 @@ function setupNode(): void {
 	//What to do if we receive a signal to shutdown?
 	process.on("SIGTERM", async () => {
 		Sandbox.unSandbox();
-		Log.info(`Node worker ${Cluster.worker.id} (pid: ${process.pid}) received SIGTERM`);
+		Log.info(`Node worker ${worker.id} (pid: ${process.pid}) received SIGTERM`);
 		if (!isShuttingDown) {
 			isShuttingDown = true;
 			await Node.shutdown();
@@ -310,7 +314,7 @@ function setupNode(): void {
 	});
 	process.on("SIGINT", async () => {
 		Sandbox.unSandbox();
-		Log.info(`Node worker ${Cluster.worker.id} (pid: ${process.pid}) received SIGINT`);
+		Log.info(`Node worker ${worker.id} (pid: ${process.pid}) received SIGINT`);
 		if (!isShuttingDown) {
 			isShuttingDown = true;
 			await Node.shutdown();
@@ -322,7 +326,7 @@ function setupNode(): void {
  * Create a new worker. Will retry until it succeeds.
  * @param type: The type of worker to create, either the network worker or the node worker.
  */
-async function createWorker(type: "network" | "node", timeout: number = 5000): Promise<Cluster.Worker> {
+async function createWorker(type: "network" | "node", timeout: number = 5000): Promise<Worker> {
 	try {
 		//For internal environment variables use snake_case
 		return Cluster.fork(Object.assign(config, { worker_type: type }));
@@ -334,10 +338,8 @@ async function createWorker(type: "network" | "node", timeout: number = 5000): P
 			Log.warn("Failed to start worker", error);
 		}
 		//Increase retry time up to 5 min max.
-		return new Promise<Cluster.Worker>((resolve) => {
-			setTimeout(() => {
-				createWorker(type, Math.min(timeout * 1.5, 300000)).then(() => resolve());
-			}, timeout);
+		return new Promise<Worker>((resolve) => {
+			setTimeout(async () => resolve(await createWorker(type, Math.min(timeout * 1.5, 300000))), timeout);
 		});
 	}
 }
@@ -348,9 +350,10 @@ async function createWorker(type: "network" | "node", timeout: number = 5000): P
  * @param hardkill whether to kill the worker if it does not gracefully shutdown within 10 seconds.
  */
 function shutdownWorker(id: string, hardkill: boolean): void {
+	const workers = Cluster.workers!;
 	//Send shutdown message for a chance to do a graceful shutdown.
-	if (Cluster.workers[id] !== undefined) {
-		Cluster.workers[id]!.send("shutdown", undefined, (error: Error | null) => {
+	if (workers[id] !== undefined) {
+		workers[id]!.send("shutdown", (error: Error | null) => {
 			//Doesn't matter if it fails, there will be a hard kill in 10 seconds.
 			//(write EPIPE errors mean the worker closed the connection, properly because it already exited.)
 			if (error !== null && error.message !== "write EPIPE") {
@@ -365,11 +368,11 @@ function shutdownWorker(id: string, hardkill: boolean): void {
 	if (hardkill) {
 		//Give every handler 10 seconds to shut down before doing a hard kill.
 		setTimeout(() => {
-			if (Cluster.workers[id] !== undefined) {
+			if (workers[id] !== undefined) {
 				isGraceful = false;
 				Log.info(`Worker ${id} not shutting down.`);
 				Log.fatal("Hard killing worker, is there a contract with an infinite loop somewhere?");
-				process.kill(Cluster.workers[id]!.process.pid, "SIGKILL");
+				process.kill(workers[id]!.process.pid!, "SIGKILL");
 			}
 		}, 10000);
 	}

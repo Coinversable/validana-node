@@ -56,66 +56,69 @@ export class NodeClient extends Client {
 
 	/** Create a server for other peers to connect to. It will also retrieve info from the processor once it has started. */
 	private createServer(): void {
-		let timeout = 5000;
+		if (!this.isClosingServer || this.permanentlyClosed) {
+			let timeout = 5000;
 
-		this.server = net.createServer();
-		this.server.maxConnections = this.config.VNODE_MAXPEERS;
+			this.server = net.createServer();
+			this.server.maxConnections = this.config.VNODE_MAXPEERS;
 
-		this.server.on("listening", async () => {
-			timeout = 5000;
-			//In case no port was specified we set it to the port that was giving.
-			this.port = (this.server!.address() as net.AddressInfo).port;
+			this.server.on("listening", async () => {
+				timeout = 5000;
+				//In case no port was specified we set it to the port that was giving.
+				this.port = (this.server!.address() as net.AddressInfo).port;
 
-			//Get the processor info. Do not await, we can get incoming connections before the response returned.
-			const retrieveProcessorPromise = this.retrieveProcessorInfo();
+				//Get the processor info. Do not await, we can get incoming connections before the response returned.
+				const retrieveProcessorPromise = this.retrieveProcessorInfo();
 
-			//When we receive a new connection.
-			this.server!.on("connection", async (socket) => {
-				//Do not create the peer till we have the processor info, as we need this when communicating.
+				//When we receive a new connection.
+				this.server!.on("connection", async (socket) => {
+					//Do not create the peer till we have the processor info, as we need this when communicating.
+					await retrieveProcessorPromise;
+
+					//Create a peer if we do not yet exceed max peers
+					const addr = socket.address() as net.AddressInfo;
+					if (this.peers.length >= this.config.VNODE_MAXPEERS || this.isClosingServer ||
+						this.hasPeer(addr.address, addr.port)) {
+						socket.end("");
+					} else {
+						const newPeer = this.createPeer(socket);
+						this.peers.push(newPeer);
+						if (this.peers.length < this.config.VNODE_MINPEERS) {
+							newPeer.getPeers();
+						}
+					}
+				});
+
+				//Now we wait for the the info to be returned before getting more peers.
 				await retrieveProcessorPromise;
 
-				//Create a peer if we do not yet exceed max peers
-				const addr = socket.address() as net.AddressInfo;
-				if (this.peers.length >= this.config.VNODE_MAXPEERS || this.hasPeer(addr.address, addr.port)) {
-					socket.end("");
+				//Get more peers if needed.
+				this.getPeers();
+			});
+
+			//Restart the server in a bit after an error.
+			this.server.on("error", (error) => {
+				Log.warn("Peer server error", error);
+				if (!this.server!.listening) {
+					timeout = Math.min(timeout * 1.5, 300000);
+					//We got an error while starting up
+					this.shutdownServer().catch(() => { }).then(() => setTimeout(() => {
+						if (!this.permanentlyClosed) {
+							this.server!.listen(this.port);
+						}
+					}, timeout));
 				} else {
-					const newPeer = this.createPeer(socket);
-					this.peers.push(newPeer);
-					if (this.peers.length < this.config.VNODE_MINPEERS) {
-						newPeer.getPeers();
-					}
+					//We got an error while we are listening
+					this.shutdownServer().catch(() => { }).then(() => setTimeout(() => {
+						if (!this.permanentlyClosed) {
+							this.server!.listen(this.port);
+						}
+					}, timeout));
 				}
 			});
 
-			//Now we wait for the the info to be returned before getting more peers.
-			await retrieveProcessorPromise;
-
-			//Get more peers if needed.
-			this.getPeers();
-		});
-
-		//Restart the server in a bit after an error.
-		this.server.on("error", async (error) => {
-			Log.warn("Peer server error", error);
-			if (!this.server!.listening) {
-				timeout = Math.min(timeout * 1.5, 300000);
-				//We got an error while starting up
-				this.shutdownServer().catch(() => { }).then(() => setTimeout(() => {
-					if (!this.permanentlyClosed) {
-						this.server!.listen(this.port);
-					}
-				}, timeout));
-			} else {
-				//We got an error while we are listening
-				this.shutdownServer().catch(() => { }).then(() => setTimeout(() => {
-					if (!this.permanentlyClosed) {
-						this.server!.listen(this.port);
-					}
-				}, timeout));
-			}
-		});
-
-		this.server.listen(this.port);
+			this.server.listen(this.port);
+		}
 	}
 
 	/**
@@ -150,7 +153,7 @@ export class NodeClient extends Client {
 				const latestStoredBlock = Math.max(...blocks.map((block) => block.block_id));
 				this.query(`NOTIFY downloaded, '${latestStoredBlock}'`, []).catch(() => { });
 
-				this.cachedBlocks.push(...this.downloadBlocks[0].data as Block[]);
+				this.cachedBlocks.push(...this.downloadBlocks[0].data);
 				if (this.cachedBlocksStartId === -1) {
 					this.cachedBlocksStartId = this.downloadBlocks[0].start;
 				}
@@ -170,11 +173,11 @@ export class NodeClient extends Client {
 				this.storeAndGetBlocks();
 			} catch (error) {
 				Log.warn("Failed to insert blocks in DB", error);
-				if (error.code.startsWith("23")) {
+				if ((error.code as string).startsWith("23")) {
 					//This should only happen if the database is setup incorrectly or the processor signed an invalid message.
 					await Log.fatal("Database setup incorrectly or processor signed invalid message.");
 					return process.exit(50);
-				} else if (error.code.startsWith("08")) {
+				} else if ((error.code as string).startsWith("08")) {
 					//The block may or may not have been succesfully stored, retry after verifying
 					setTimeout(() => this.getLatestRetrievedBlock().then((blockId) => {
 						if (this.downloadBlocks[0].start < blockId) {

@@ -6,10 +6,12 @@
  * found in the LICENSE file at https://validana.io/license
  */
 
-import * as Cluster from "cluster";
 import * as FS from "fs";
 import * as Path from "path";
 import { Log, Crypto, PublicKey } from "@coinversable/validana-core";
+import { Cluster as ClusterType } from "cluster";
+// eslint-disable-next-line
+const Cluster: ClusterType = require("cluster");
 
 /** The config for the node. Using all capitalized names because this is the standard for environment variables. */
 export interface Config extends StringConfig, NumberConfig, BooleanConfig { }
@@ -110,7 +112,7 @@ const booleanConfig: BooleanConfig = {
 /** Load the configuration values from the environment variables and config file. */
 export function loadConfig(): Readonly<Config> {
 	loadEnv();
-	if (Cluster.isMaster) {
+	if (!Cluster.isWorker) {
 		loadFile();
 		validate();
 	}
@@ -129,7 +131,7 @@ function loadEnv(): void {
 	for (const key of Object.keys(numberConfig)) {
 		const processKey = process.env[key];
 		if (processKey !== undefined) {
-			const envValue = Number.parseInt(processKey, undefined);
+			const envValue = Number.parseInt(processKey); //eslint-disable-line radix
 			if (!Number.isSafeInteger(envValue)) {
 				throw new Error(`Invalid value: ${envValue} for environment variable: ${key}, expected an integer.`);
 			} else {

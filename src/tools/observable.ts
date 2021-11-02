@@ -17,10 +17,10 @@ import { Log } from "@coinversable/validana-core";
 export class VObservable<T> {
 	private static deprecatedWarning: boolean = false;
 
-	// The observers this observable should notify
+	//The observers this observable should notify
 	private observers: Array<VObserver<T>> = [];
 
-	// If this object has changed
+	//If this object has changed
 	private changed: boolean = false;
 
 	public constructor() {
@@ -79,7 +79,7 @@ export class VObservable<T> {
 	 * @param arg (optional) additional argument to pass on
 	 */
 	public notifyObservers(arg?: T): void {
-		// Make sure there are changes to notify
+		//Make sure there are changes to notify
 		if (this.hasChanged()) {
 			for (const observer of this.observers) {
 				observer.update(this, arg);

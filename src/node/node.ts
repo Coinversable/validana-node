@@ -77,7 +77,7 @@ export class Node extends Basic {
 		this.notificationsClient = new Client({
 			user: config.VNODE_DBUSER_NETWORK,
 			database: config.VNODE_DBNAME,
-			password: config.VNODE_DBPASSWORD,
+			password: config.VNODE_DBPASSWORD_NETWORK,
 			port: config.VNODE_DBPORT,
 			host: config.VNODE_DBHOST
 		}).on("error", (error) => {
@@ -324,7 +324,7 @@ export class Node extends Basic {
 				}
 
 				const processResult = await this.processTx(transaction, this.currentBlock.id, this.currentBlock.processedTs,
-					this.processorAddress!, previousBlockTs, previousBlockHash, false);
+					this.processorAddress, previousBlockTs, previousBlockHash, false);
 
 				try { //Update transaction savepoint
 					if (processResult.status !== "accepted" && processResult.status !== "v1Rejected") {
@@ -413,7 +413,6 @@ export class Node extends Basic {
 
 				const payload = processedTx.getPayloadJson();
 				const receiver = (payload as any)?.receiver;
-				// tslint:disable-next-line: no-null-keyword
 				receivers.push(receiver == null ? undefined : String(receiver).slice(0, 35));
 			}
 			const params: any[] = [versions, ids, contractHashes, validTills, payloads, publicKeys,

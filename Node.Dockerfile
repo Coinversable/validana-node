@@ -1,12 +1,12 @@
 # Enter the same version as the processor here
-ARG NODEVERSION=12
+ARG NODEVERSION=16
 FROM node:${NODEVERSION}
 
 # Clone the projects into the docker container and compile it
 ENV NODE_ENV=production
 ENV NODE_NO_WARNINGS=1
 RUN yarn global add typescript
-RUN git clone https://github.com/Coinversable/validana-node.git --branch v2.1.2 /usr/node
+RUN git clone https://github.com/Coinversable/validana-node.git --branch v2.2.0 /usr/node
 RUN yarn --cwd /usr/node install --frozen-lockfile
 RUN tsc -p /usr/node/tsconfig.json
 
@@ -47,7 +47,7 @@ RUN tsc -p /usr/node/tsconfig.json
 #ENV VNODE_SIGNPREFIX=
 #ENV VNODE_PROCESSORPORT=443
 #ENV VNODE_REMEMBERPEER=168
-#ENV VNODE_BLOCKINTERVAL=65
+#ENV VNODE_BLOCKINTERVAL=5
 #ENV VNODE_LATESTEXISTINGBLOCK=-1
 #ENV VNODE_MAXBLOCKSIZE=1000000
 # Add certificate if wanted
